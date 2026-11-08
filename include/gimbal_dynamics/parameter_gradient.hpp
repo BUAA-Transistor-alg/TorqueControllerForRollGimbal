@@ -15,15 +15,14 @@
 
 #include <cstddef>
 
-#include <Eigen/Core>
-
+#include "gimbal_dynamics/math_types.hpp"
 #include "gimbal_dynamics/parameters.hpp"
 #include "gimbal_dynamics/simulation.hpp"
 
 namespace gimbal {
 namespace parameter_gradient {
 
-using Gradient = Eigen::Matrix<double, parameters::kParameterCount, 1>;
+using Gradient = math::Vector<double, parameters::kParameterCount>;
 
 // 调用方分配一次、可跨多次调用复用的缓冲
 struct Workspace {
@@ -39,7 +38,7 @@ struct Workspace {
 // base 与 torque 的长度均为 num_steps。
 double simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain,
                               const simulation::State& initial, const BaseState* base,
-                              const Eigen::Vector4d* torque, std::size_t num_steps,
+                              const math::Vector4d* torque, std::size_t num_steps,
                               const simulation::TrajectorySpec& spec,
                               const simulation::LossSpec& loss, Workspace& workspace,
                               Gradient* gradient, simulation::State* final_state);

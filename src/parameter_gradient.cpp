@@ -20,7 +20,7 @@ void Workspace::release() {
 
 double simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain,
                               const simulation::State& initial, const BaseState* base,
-                              const Eigen::Vector4d* torque, std::size_t num_steps,
+                              const math::Vector4d* torque, std::size_t num_steps,
                               const simulation::TrajectorySpec& spec,
                               const simulation::LossSpec& loss, Workspace& workspace,
                               Gradient* gradient, simulation::State* final_state) {
@@ -48,9 +48,9 @@ double simulateAndSensitivity(const ModelParameters& model, const Terrain& terra
     const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
     const detail::ScalarModelParameters<double> scalar_model =
         detail::convert_model<double>(model);
-    Eigen::Matrix<double, 8, parameters::kParameterCount> sensitivity =
-        Eigen::Matrix<double, 8, parameters::kParameterCount>::Zero();
-    Gradient total = Gradient::Zero();
+    math::Matrix<double, 8, parameters::kParameterCount> sensitivity =
+        math::Matrix<double, 8, parameters::kParameterCount>::zero();
+    Gradient total = Gradient::zero();
 
     // 由前向仿真已缓存的阶段中间量同时得到状态 Jacobian 与参数 Jacobian
     for (std::size_t k = 0; k < num_steps; ++k) {
@@ -60,17 +60,17 @@ double simulateAndSensitivity(const ModelParameters& model, const Terrain& terra
             detail::ParameterJacobian stage_parameter[4];
             for (int t = 0; t < 4; ++t) {
                 const std::size_t index = substep * 4 + static_cast<std::size_t>(t);
-                stage[t].state = Eigen::Matrix<double, 8, 8>::Zero();
+                stage[t].state = math::Matrix8d::zero();
                 stage_parameter[t] = detail::evaluate_parameter_jacobian(
                     stage_cache[index], scalar_model, stage[t].state);
             }
-            Eigen::Matrix<double, 8, 8> propagation;
+            math::Matrix8d propagation;
             detail::ParameterJacobian parameter_jacobian;
             detail::assemble_parameter_substep(stage, stage_parameter, h, propagation,
                                                parameter_jacobian);
             sensitivity = propagation * sensitivity + parameter_jacobian;
         }
-        total += sensitivity.transpose() *
+        total += transpose(sensitivity) *
                  simulation::step_loss_gradient(loss, num_steps, k, workspace.trace.step_end[k]);
     }
     *gradient = total;

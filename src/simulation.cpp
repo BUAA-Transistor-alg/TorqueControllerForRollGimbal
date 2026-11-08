@@ -21,15 +21,19 @@ BaseState advance_base(const BaseState& base, double time) {
 
 detail::StateVector<double> pack(const State& state) {
     detail::StateVector<double> result;
-    result.head<4>() = state.angle;
-    result.tail<4>() = state.velocity;
+    for (int i = 0; i < 4; ++i) {
+        result[i] = state.angle[i];
+        result[4 + i] = state.velocity[i];
+    }
     return result;
 }
 
 State unpack(const detail::StateVector<double>& state) {
     State result;
-    result.angle = state.head<4>();
-    result.velocity = state.tail<4>();
+    for (int i = 0; i < 4; ++i) {
+        result.angle[i] = state[i];
+        result.velocity[i] = state[4 + i];
+    }
     return result;
 }
 
@@ -63,9 +67,9 @@ void validate(const TrajectorySpec& spec, std::size_t num_steps) {
     }
 }
 
-Eigen::Matrix<double, 8, 1> state_derivative(const ModelParameters& model, const Terrain& terrain,
-                                             const BaseState& base, const State& state,
-                                             const Eigen::Vector4d& torque) {
+math::Vector8d state_derivative(const ModelParameters& model, const Terrain& terrain,
+                                const BaseState& base, const State& state,
+                                const math::Vector4d& torque) {
     const detail::ScalarModelParameters<double> scalar_model = detail::convert_model<double>(model);
     const detail::ScalarTerrain<double> scalar_terrain = detail::convert_terrain<double>(terrain);
     return detail::evaluate_derivative<double>(scalar_model, scalar_terrain, base, pack(state),
@@ -73,7 +77,7 @@ Eigen::Matrix<double, 8, 1> state_derivative(const ModelParameters& model, const
 }
 
 double step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
-                 const State& state, const Eigen::Vector4d& torque) {
+                 const State& state, const math::Vector4d& torque) {
     const double scale = 1.0 / (2.0 * static_cast<double>(num_steps));
     double total = 0.0;
     for (int i = 0; i < 4; ++i) {
@@ -90,10 +94,10 @@ double step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
     return scale * total;
 }
 
-Eigen::Matrix<double, 8, 1> step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
-                                               std::size_t step, const State& state) {
+math::Vector8d step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
+                                  std::size_t step, const State& state) {
     const double scale = 1.0 / static_cast<double>(num_steps);
-    Eigen::Matrix<double, 8, 1> gradient;
+    math::Vector8d gradient;
     for (int i = 0; i < 4; ++i) {
         const double angle_target =
             (loss.target_angle != nullptr) ? loss.target_angle[step][i] : 0.0;
@@ -107,7 +111,7 @@ Eigen::Matrix<double, 8, 1> step_loss_gradient(const LossSpec& loss, std::size_t
 }
 
 double simulate(const ModelParameters& model, const Terrain& terrain, const State& initial,
-                const BaseState* base, const Eigen::Vector4d* torque, std::size_t num_steps,
+                const BaseState* base, const math::Vector4d* torque, std::size_t num_steps,
                 const TrajectorySpec& spec, const LossSpec& loss, Trace& trace) {
     return detail::simulate_trajectory(model, terrain, initial, base, torque, num_steps, spec,
                                        loss, trace, nullptr);
@@ -119,7 +123,7 @@ namespace detail {
 
 double simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
                            const simulation::State& initial, const BaseState* base,
-                           const Eigen::Vector4d* torque, std::size_t num_steps,
+                           const math::Vector4d* torque, std::size_t num_steps,
                            const simulation::TrajectorySpec& spec,
                            const simulation::LossSpec& loss, simulation::Trace& trace,
                            std::vector<StageData>* stage_cache) {
@@ -143,7 +147,7 @@ double simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
     double total_loss = 0.0;
 
     for (std::size_t k = 0; k < num_steps; ++k) {
-        const Eigen::Vector4d torque_k = torque[k];
+        const math::Vector4d torque_k = torque[k];
         for (int s = 0; s < spec.refinement; ++s) {
             const double substep_time = static_cast<double>(s) * h;
             const std::size_t record = (k * static_cast<std::size_t>(spec.refinement) +
@@ -162,14 +166,16 @@ double simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
             for (int t = 0; t < 4; ++t) {
                 if (t > 0) {
                     const double advance = (t == 3) ? h : 0.5 * h;
-                    stage_state[t] = stage_state[0] + advance * stage_derivative[t - 1];
+                    stage_state[t] = stage_state[0] + stage_derivative[t - 1] * advance;
                 }
                 if (stage_cache != nullptr) {
                     StageData& data = (*stage_cache)[record + static_cast<std::size_t>(t)];
                     evaluate_stage_data(scalar_model, scalar_terrain, stage_input[t],
                                         simulation::unpack(stage_state[t]), torque_k, data);
-                    stage_derivative[t].head<4>() = stage_state[t].tail<4>();
-                    stage_derivative[t].tail<4>() = data.acceleration;
+                    for (int i = 0; i < 4; ++i) {
+                        stage_derivative[t][i] = stage_state[t][4 + i];
+                        stage_derivative[t][4 + i] = data.acceleration[i];
+                    }
                 } else {
                     stage_derivative[t] = evaluate_derivative<double>(
                         scalar_model, scalar_terrain, stage_input[t], stage_state[t], torque_k);
@@ -180,8 +186,8 @@ double simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
             }
 
             state = stage_state[0] +
-                    (h / 6.0) * (stage_derivative[0] + 2.0 * stage_derivative[1] +
-                                 2.0 * stage_derivative[2] + stage_derivative[3]);
+                    (stage_derivative[0] + stage_derivative[1] * 2.0 +
+                     stage_derivative[2] * 2.0 + stage_derivative[3]) * (h / 6.0);
         }
         trace.step_end[k] = simulation::unpack(state);
         total_loss += simulation::step_loss(loss, num_steps, k, trace.step_end[k], torque_k);

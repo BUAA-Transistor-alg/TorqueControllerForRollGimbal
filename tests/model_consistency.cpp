@@ -33,24 +33,25 @@ int main() {
         base.yaw = 3.0 * unit(rng);
         base.yaw_rate = 2.0 * unit(rng);
         base.yaw_acceleration = 5.0 * unit(rng);
-        base.acceleration =
-            Eigen::Vector3d(3.0 * unit(rng), 3.0 * unit(rng), 3.0 * unit(rng));
+        base.acceleration[0] = 3.0 * unit(rng);
+        base.acceleration[1] = 3.0 * unit(rng);
+        base.acceleration[2] = 3.0 * unit(rng);
 
-        Eigen::Vector4d q;
-        Eigen::Vector4d qdot;
-        Eigen::Vector4d torque;
+        math::Vector4d q;
+        math::Vector4d qdot;
+        math::Vector4d torque;
         for (int i = 0; i < 4; ++i) {
             q[i] = 2.0 * unit(rng);
             qdot[i] = 4.0 * unit(rng);
             torque[i] = 2.0 * unit(rng);
         }
 
-        const Eigen::Vector4d closed = forward_dynamics(model, terrain, base, q, qdot, torque);
+        const math::Vector4d closed = forward_dynamics(model, terrain, base, q, qdot, torque);
 
         simulation::State state;
         state.angle = q;
         state.velocity = qdot;
-        const Eigen::Matrix<double, 8, 1> derivative =
+        const math::Vector8d derivative =
             simulation::state_derivative(model, terrain, base, state, torque);
 
         for (int i = 0; i < 4; ++i) {

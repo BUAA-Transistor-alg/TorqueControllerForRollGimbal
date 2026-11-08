@@ -18,8 +18,7 @@
 #include <cstddef>
 #include <vector>
 
-#include <Eigen/Core>
-
+#include "gimbal_dynamics/math_types.hpp"
 #include "gimbal_dynamics/simulation.hpp"
 
 namespace gimbal {
@@ -27,9 +26,9 @@ namespace control_gradient {
 
 // 调用方分配一次、可跨多次调用复用的缓冲
 struct Workspace {
-    simulation::Trace trace;                                    // 前向轨迹记录
-    std::vector<Eigen::Matrix<double, 8, 8>> propagation;       // 每子步 W
-    std::vector<Eigen::Matrix<double, 8, 4>> input_jacobian;    // 每子步 Ψ
+    simulation::Trace trace;                     // 前向轨迹记录
+    std::vector<math::Matrix8d> propagation;     // 每子步 W
+    std::vector<math::Matrix84d> input_jacobian; // 每子步 Ψ
 
     void resize(std::size_t num_steps, int refinement);
     void release();
@@ -41,10 +40,10 @@ struct Workspace {
 // base 与 torque 的长度均为 num_steps。
 double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
                            const simulation::State& initial, const BaseState* base,
-                           const Eigen::Vector4d* torque, std::size_t num_steps,
+                           const math::Vector4d* torque, std::size_t num_steps,
                            const simulation::TrajectorySpec& spec,
                            const simulation::LossSpec& loss, Workspace& workspace,
-                           Eigen::Vector4d* gradient, simulation::State* final_state);
+                           math::Vector4d* gradient, simulation::State* final_state);
 
 }  // namespace control_gradient
 }  // namespace gimbal

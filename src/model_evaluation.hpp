@@ -16,10 +16,8 @@
 #include <stdexcept>
 #include <type_traits>
 
-#include <Eigen/Cholesky>
-#include <Eigen/Core>
-
 #include "gimbal_dynamics/dynamics_model.hpp"
+#include "gimbal_dynamics/math_types.hpp"
 
 namespace gimbal {
 namespace detail {
@@ -30,35 +28,26 @@ using Complex = std::complex<double>;
 inline constexpr double kComplexStep = 1e-20;
 
 template <typename Scalar>
-using Vector3 = Eigen::Matrix<Scalar, 3, 1>;
+using Vector3 = math::Vector<Scalar, 3>;
 template <typename Scalar>
-using Matrix3 = Eigen::Matrix<Scalar, 3, 3>;
+using Matrix3 = math::Matrix<Scalar, 3, 3>;
 template <typename Scalar>
-using Vector4 = Eigen::Matrix<Scalar, 4, 1>;
+using Vector4 = math::Vector<Scalar, 4>;
 template <typename Scalar>
-using Matrix4 = Eigen::Matrix<Scalar, 4, 4>;
+using Matrix4 = math::Matrix<Scalar, 4, 4>;
 template <typename Scalar>
-using StateVector = Eigen::Matrix<Scalar, 8, 1>;
+using Matrix34 = math::Matrix<Scalar, 3, 4>;
+template <typename Scalar>
+using StateVector = math::Vector<Scalar, 8>;
 
-// 叉乘与点积显式展开：Eigen 的 cross 只接受三维向量，dot 对复数会取共轭。
-template <typename LhsDerived, typename RhsDerived>
-Eigen::Matrix<typename LhsDerived::Scalar, 3, 1> cross_product(
-    const Eigen::MatrixBase<LhsDerived>& lhs, const Eigen::MatrixBase<RhsDerived>& rhs) {
-    using Scalar = typename LhsDerived::Scalar;
-    static_assert(std::is_same<Scalar, typename RhsDerived::Scalar>::value,
-                  "叉乘两端的标量类型必须一致");
-    return Eigen::Matrix<Scalar, 3, 1>(lhs.y() * rhs.z() - lhs.z() * rhs.y(),
-                                       lhs.z() * rhs.x() - lhs.x() * rhs.z(),
-                                       lhs.x() * rhs.y() - lhs.y() * rhs.x());
+template <typename Scalar>
+Vector3<Scalar> cross_product(const Vector3<Scalar>& lhs, const Vector3<Scalar>& rhs) {
+    return math::cross(lhs, rhs);
 }
 
-template <typename LhsDerived, typename RhsDerived>
-typename LhsDerived::Scalar dot_product(const Eigen::MatrixBase<LhsDerived>& lhs,
-                                        const Eigen::MatrixBase<RhsDerived>& rhs) {
-    using Scalar = typename LhsDerived::Scalar;
-    static_assert(std::is_same<Scalar, typename RhsDerived::Scalar>::value,
-                  "点积两端的标量类型必须一致");
-    return (lhs.transpose() * rhs)(0, 0);
+template <typename Scalar>
+Scalar dot_product(const Vector3<Scalar>& lhs, const Vector3<Scalar>& rhs) {
+    return math::dot(lhs, rhs);
 }
 
 template <typename Scalar>
@@ -66,9 +55,15 @@ Matrix3<Scalar> rotation_x(const Scalar& angle) {
     const Scalar cosine = std::cos(angle);
     const Scalar sine = std::sin(angle);
     Matrix3<Scalar> matrix;
-    matrix << Scalar(1), Scalar(0), Scalar(0),
-              Scalar(0), cosine, -sine,
-              Scalar(0), sine, cosine;
+    matrix.data[0][0] = Scalar(1);
+    matrix.data[0][1] = Scalar(0);
+    matrix.data[0][2] = Scalar(0);
+    matrix.data[1][0] = Scalar(0);
+    matrix.data[1][1] = cosine;
+    matrix.data[1][2] = -sine;
+    matrix.data[2][0] = Scalar(0);
+    matrix.data[2][1] = sine;
+    matrix.data[2][2] = cosine;
     return matrix;
 }
 
@@ -77,9 +72,15 @@ Matrix3<Scalar> rotation_y(const Scalar& angle) {
     const Scalar cosine = std::cos(angle);
     const Scalar sine = std::sin(angle);
     Matrix3<Scalar> matrix;
-    matrix << cosine, Scalar(0), sine,
-              Scalar(0), Scalar(1), Scalar(0),
-              -sine, Scalar(0), cosine;
+    matrix.data[0][0] = cosine;
+    matrix.data[0][1] = Scalar(0);
+    matrix.data[0][2] = sine;
+    matrix.data[1][0] = Scalar(0);
+    matrix.data[1][1] = Scalar(1);
+    matrix.data[1][2] = Scalar(0);
+    matrix.data[2][0] = -sine;
+    matrix.data[2][1] = Scalar(0);
+    matrix.data[2][2] = cosine;
     return matrix;
 }
 
@@ -88,9 +89,15 @@ Matrix3<Scalar> rotation_z(const Scalar& angle) {
     const Scalar cosine = std::cos(angle);
     const Scalar sine = std::sin(angle);
     Matrix3<Scalar> matrix;
-    matrix << cosine, -sine, Scalar(0),
-              sine, cosine, Scalar(0),
-              Scalar(0), Scalar(0), Scalar(1);
+    matrix.data[0][0] = cosine;
+    matrix.data[0][1] = -sine;
+    matrix.data[0][2] = Scalar(0);
+    matrix.data[1][0] = sine;
+    matrix.data[1][1] = cosine;
+    matrix.data[1][2] = Scalar(0);
+    matrix.data[2][0] = Scalar(0);
+    matrix.data[2][1] = Scalar(0);
+    matrix.data[2][2] = Scalar(1);
     return matrix;
 }
 
@@ -99,13 +106,13 @@ template <typename Scalar>
 Vector3<Scalar> axis_local(int joint) {
     switch (joint) {
         case 0:
-            return Vector3<Scalar>::UnitZ();
+            return Vector3<Scalar>::unit(2);
         case 1:
-            return Vector3<Scalar>::UnitY();
+            return Vector3<Scalar>::unit(1);
         case 2:
-            return Vector3<Scalar>::UnitZ();
+            return Vector3<Scalar>::unit(2);
         case 3:
-            return Vector3<Scalar>::UnitX();
+            return Vector3<Scalar>::unit(0);
         default:
             throw std::invalid_argument("关节编号超出范围");
     }
@@ -132,15 +139,15 @@ Matrix3<Scalar> local_rotation(int joint, const Scalar& angle) {
 template <typename Scalar>
 struct ScalarBodyParameters {
     Scalar mass = Scalar(0);
-    Vector3<Scalar> com = Vector3<Scalar>::Zero();
-    Matrix3<Scalar> inertia = Matrix3<Scalar>::Zero();
+    Vector3<Scalar> com = Vector3<Scalar>::zero();
+    Matrix3<Scalar> inertia = Matrix3<Scalar>::zero();
 };
 
 template <typename Scalar>
 struct ScalarModelParameters {
     std::array<ScalarBodyParameters<Scalar>, 4> bodies{};
     std::array<Vector3<Scalar>, 4> joint_offsets{};
-    Vector4<Scalar> damping = Vector4<Scalar>::Zero();
+    Vector4<Scalar> damping = Vector4<Scalar>::zero();
     Scalar gravity = Scalar(0);
 };
 
@@ -217,13 +224,13 @@ Chain<Scalar> evaluate_chain(const ScalarModelParameters<Scalar>& model,
                              const ScalarTerrain<Scalar>& terrain, const BaseState& base,
                              const Vector4<Scalar>& q) {
     Chain<Scalar> chain;
-    const Matrix3<Scalar> terrain_frame = rotation_z(terrain.slope_direction) *
-                                         rotation_y(terrain.slope_angle) *
-                                         rotation_z(-terrain.slope_direction);
+    const Matrix3<Scalar> terrain_frame =
+        rotation_z(terrain.slope_direction) * rotation_y(terrain.slope_angle) *
+        rotation_z(-terrain.slope_direction);
     const Matrix3<Scalar> base_rotation = terrain_frame * rotation_z(Scalar(base.yaw));
-    chain.normal = terrain_frame * Vector3<Scalar>::UnitZ();
+    chain.normal = terrain_frame * Vector3<Scalar>::unit(2);
     Matrix3<Scalar> parent_rotation = base_rotation;
-    Vector3<Scalar> parent_origin = Vector3<Scalar>::Zero();
+    Vector3<Scalar> parent_origin = Vector3<Scalar>::zero();
     for (int joint = 0; joint < 4; ++joint) {
         const Vector3<Scalar> offset = parent_rotation * model.joint_offsets[joint];
         const Vector3<Scalar> origin = parent_origin + offset;
@@ -242,8 +249,8 @@ Chain<Scalar> evaluate_chain(const ScalarModelParameters<Scalar>& model,
 // 质量矩阵求值的中间量，供导数阶段复用
 template <typename Scalar>
 struct MassInternals {
-    std::array<Eigen::Matrix<Scalar, 3, 4>, 4> velocity_jacobian{};
-    std::array<Eigen::Matrix<Scalar, 3, 4>, 4> angular_jacobian{};
+    std::array<Matrix34<Scalar>, 4> velocity_jacobian{};
+    std::array<Matrix34<Scalar>, 4> angular_jacobian{};
     std::array<Matrix3<Scalar>, 4> inertia_world{};
 };
 
@@ -252,19 +259,22 @@ template <typename Scalar>
 Matrix4<Scalar> evaluate_mass_matrix(const ScalarModelParameters<Scalar>& model,
                                      const Chain<Scalar>& chain,
                                      MassInternals<Scalar>* internals = nullptr) {
-    Matrix4<Scalar> mass = Matrix4<Scalar>::Zero();
+    Matrix4<Scalar> mass = Matrix4<Scalar>::zero();
     for (int i = 0; i < 4; ++i) {
-        Eigen::Matrix<Scalar, 3, 4> velocity_jacobian = Eigen::Matrix<Scalar, 3, 4>::Zero();
-        Eigen::Matrix<Scalar, 3, 4> angular_jacobian = Eigen::Matrix<Scalar, 3, 4>::Zero();
+        Matrix34<Scalar> velocity_jacobian = Matrix34<Scalar>::zero();
+        Matrix34<Scalar> angular_jacobian = Matrix34<Scalar>::zero();
         for (int joint = 0; joint <= i; ++joint) {
-            velocity_jacobian.col(joint) =
-                cross_product(chain.axis[joint], chain.com[i] - chain.joint_origin[joint]);
-            angular_jacobian.col(joint) = chain.axis[joint];
+            const Vector3<Scalar> arm = chain.com[i] - chain.joint_origin[joint];
+            const Vector3<Scalar> velocity_column = cross_product(chain.axis[joint], arm);
+            for (int row = 0; row < 3; ++row) {
+                velocity_jacobian(row, joint) = velocity_column[row];
+                angular_jacobian(row, joint) = chain.axis[joint][row];
+            }
         }
         const Matrix3<Scalar> inertia_world =
-            chain.rotation[i] * model.bodies[i].inertia * chain.rotation[i].transpose();
-        mass += model.bodies[i].mass * velocity_jacobian.transpose() * velocity_jacobian;
-        mass += angular_jacobian.transpose() * inertia_world * angular_jacobian;
+            chain.rotation[i] * model.bodies[i].inertia * transpose(chain.rotation[i]);
+        mass += model.bodies[i].mass * (transpose(velocity_jacobian) * velocity_jacobian);
+        mass += transpose(angular_jacobian) * inertia_world * angular_jacobian;
         if (internals != nullptr) {
             internals->velocity_jacobian[i] = velocity_jacobian;
             internals->angular_jacobian[i] = angular_jacobian;
@@ -296,12 +306,14 @@ Vector4<Scalar> evaluate_bias(const ScalarModelParameters<Scalar>& model,
                               BiasInternals<Scalar>* internals = nullptr,
                               const MassInternals<Scalar>* mass_internals = nullptr) {
     BiasInternals<Scalar> data;
-    const Vector3<Scalar> gravity_vector(Scalar(0), Scalar(0), -model.gravity);
-    const Vector3<Scalar> base_omega = Scalar(base.yaw_rate) * chain.normal;
-    const Vector3<Scalar> base_alpha = Scalar(base.yaw_acceleration) * chain.normal;
-    const Vector3<Scalar> base_acceleration(
-        Scalar(base.acceleration.x()), Scalar(base.acceleration.y()),
-        Scalar(base.acceleration.z()));
+    Vector3<Scalar> gravity_vector = Vector3<Scalar>::zero();
+    gravity_vector[2] = -model.gravity;
+    const Vector3<Scalar> base_omega = chain.normal * Scalar(base.yaw_rate);
+    const Vector3<Scalar> base_alpha = chain.normal * Scalar(base.yaw_acceleration);
+    Vector3<Scalar> base_acceleration;
+    for (int i = 0; i < 3; ++i) {
+        base_acceleration[i] = Scalar(base.acceleration[i]);
+    }
 
     Vector3<Scalar> previous_omega = base_omega;
     Vector3<Scalar> previous_alpha = base_alpha;
@@ -333,15 +345,15 @@ Vector4<Scalar> evaluate_bias(const ScalarModelParameters<Scalar>& model,
         const Matrix3<Scalar> inertia_world =
             (mass_internals != nullptr)
                 ? (*mass_internals).inertia_world[i]
-                : chain.rotation[i] * model.bodies[i].inertia * chain.rotation[i].transpose();
+                : chain.rotation[i] * model.bodies[i].inertia * transpose(chain.rotation[i]);
         data.force[i] = model.bodies[i].mass * (data.com_acceleration[i] - gravity_vector);
         data.couple[i] = inertia_world * data.alpha[i] +
                          cross_product(data.omega[i], inertia_world * data.omega[i]);
     }
 
-    Vector4<Scalar> bias = Vector4<Scalar>::Zero();
-    Vector3<Scalar> child_force = Vector3<Scalar>::Zero();
-    Vector3<Scalar> child_moment = Vector3<Scalar>::Zero();
+    Vector4<Scalar> bias = Vector4<Scalar>::zero();
+    Vector3<Scalar> child_force = Vector3<Scalar>::zero();
+    Vector3<Scalar> child_moment = Vector3<Scalar>::zero();
     for (int i = 3; i >= 0; --i) {
         Vector3<Scalar> moment =
             data.couple[i] + cross_product(chain.com[i] - chain.joint_origin[i], data.force[i]);
@@ -361,29 +373,13 @@ Vector4<Scalar> evaluate_bias(const ScalarModelParameters<Scalar>& model,
     return bias;
 }
 
-// 求解 M q̈ = rhs。double 用 LLT；复数用实部 LLT 加一阶虚部修正，
-// 保证复步长求得的导数精确。
+// 求解 M q̈ = rhs。double 用 Cholesky；复数用实部 Cholesky 加一阶虚部修正。
 inline Vector4<double> solve_mass(const Matrix4<double>& mass, const Vector4<double>& rhs) {
-    const Eigen::LLT<Matrix4<double>> decomposition(mass);
-    if (decomposition.info() != Eigen::Success) {
-        throw std::runtime_error("惯量矩阵不是正定矩阵");
-    }
-    return decomposition.solve(rhs);
+    return math::solve4(mass, rhs);
 }
 
 inline Vector4<Complex> solve_mass(const Matrix4<Complex>& mass, const Vector4<Complex>& rhs) {
-    const Eigen::LLT<Matrix4<double>> decomposition(Matrix4<double>(mass.real()));
-    if (decomposition.info() != Eigen::Success) {
-        throw std::runtime_error("惯量矩阵不是正定矩阵");
-    }
-    const Vector4<double> real_solution = decomposition.solve(Vector4<double>(rhs.real()));
-    const Vector4<double> imag_rhs = Vector4<double>(rhs.imag()) - Matrix4<double>(mass.imag()) * real_solution;
-    const Vector4<double> imag_solution = decomposition.solve(imag_rhs);
-    Vector4<Complex> solution;
-    for (int i = 0; i < 4; ++i) {
-        solution[i] = Complex(real_solution[i], imag_solution[i]);
-    }
-    return solution;
+    return math::solve4(mass, rhs);
 }
 
 // 状态导数 y' = f(y, u)，y = [q; q̇]，u = τ
@@ -392,20 +388,27 @@ StateVector<Scalar> evaluate_derivative(const ScalarModelParameters<Scalar>& mod
                                         const ScalarTerrain<Scalar>& terrain,
                                         const BaseState& base, const StateVector<Scalar>& state,
                                         const Vector4<Scalar>& torque) {
-    const Vector4<Scalar> q = state.template head<4>();
-    const Vector4<Scalar> qdot = state.template tail<4>();
+    Vector4<Scalar> q;
+    Vector4<Scalar> qdot;
+    for (int i = 0; i < 4; ++i) {
+        q[i] = state[i];
+        qdot[i] = state[4 + i];
+    }
     const Chain<Scalar> chain = evaluate_chain(model, terrain, base, q);
     MassInternals<Scalar> mass_internals;
     const Matrix4<Scalar> mass = evaluate_mass_matrix(model, chain, &mass_internals);
     const Vector4<Scalar> bias = evaluate_bias(
         model, chain, base, qdot, static_cast<BiasInternals<Scalar>*>(nullptr), &mass_internals);
-    const Vector4<Scalar> rhs = torque - model.damping.cwiseProduct(qdot) - bias;
+    const Vector4<Scalar> rhs = torque - elementwise(model.damping, qdot) - bias;
     const Vector4<Scalar> qdd = solve_mass(mass, rhs);
     StateVector<Scalar> derivative;
-    derivative.template head<4>() = qdot;
-    derivative.template tail<4>() = qdd;
+    for (int i = 0; i < 4; ++i) {
+        derivative[i] = qdot[i];
+        derivative[4 + i] = qdd[i];
+    }
     return derivative;
 }
 
 }  // namespace detail
 }  // namespace gimbal
+

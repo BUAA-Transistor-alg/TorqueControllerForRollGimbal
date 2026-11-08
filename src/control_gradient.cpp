@@ -25,10 +25,10 @@ void Workspace::release() {
 
 double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
                            const simulation::State& initial, const BaseState* base,
-                           const Eigen::Vector4d* torque, std::size_t num_steps,
+                           const math::Vector4d* torque, std::size_t num_steps,
                            const simulation::TrajectorySpec& spec,
                            const simulation::LossSpec& loss, Workspace& workspace,
-                           Eigen::Vector4d* gradient, simulation::State* final_state) {
+                           math::Vector4d* gradient, simulation::State* final_state) {
     simulation::validate(spec, num_steps);
     if (base == nullptr) {
         throw std::invalid_argument("base 不能为空");
@@ -38,8 +38,7 @@ double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
     }
     workspace.resize(num_steps, spec.refinement);
     const std::size_t refinement_count = static_cast<std::size_t>(spec.refinement);
-    std::vector<detail::StageData> stage_cache(
-        num_steps * refinement_count * 4);
+    std::vector<detail::StageData> stage_cache(num_steps * refinement_count * 4);
     const double loss_value = detail::simulate_trajectory(
         model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace,
         &stage_cache);
@@ -70,18 +69,18 @@ double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
     }
 
     // 反向扫描：协态按子步逆序传播，输入梯度在同一主步内累加
-    Eigen::Matrix<double, 8, 1> adjoint = Eigen::Matrix<double, 8, 1>::Zero();
+    math::Vector8d adjoint = math::Vector8d::zero();
     const double torque_scale = 1.0 / static_cast<double>(num_steps);
     for (std::size_t k = num_steps; k-- > 0;) {
         adjoint += simulation::step_loss_gradient(loss, num_steps, k, workspace.trace.step_end[k]);
-        Eigen::Vector4d accumulated = Eigen::Vector4d::Zero();
+        math::Vector4d accumulated = math::Vector4d::zero();
         for (std::size_t s = refinement; s-- > 0;) {
             const std::size_t substep = k * refinement + s;
-            accumulated += workspace.input_jacobian[substep].transpose() * adjoint;
-            adjoint = workspace.propagation[substep].transpose() * adjoint;
+            accumulated += transpose(workspace.input_jacobian[substep]) * adjoint;
+            adjoint = transpose(workspace.propagation[substep]) * adjoint;
         }
         gradient[k] =
-            accumulated + torque_scale * loss.torque_weights.cwiseProduct(torque[k]);
+            accumulated + elementwise(loss.torque_weights, torque[k]) * torque_scale;
     }
     return loss_value;
 }

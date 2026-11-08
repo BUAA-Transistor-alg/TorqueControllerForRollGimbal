@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "gimbal_dynamics/dynamics_model.hpp"
+#include "gimbal_dynamics/math_types.hpp"
 #include "gimbal_dynamics/simulation.hpp"
 #include "stage_data.hpp"
 
@@ -19,7 +20,7 @@ namespace detail {
 // stage_cache 非空时写入 num_steps * refinement * 4 个阶段中间量
 double simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
                            const simulation::State& initial, const BaseState* base,
-                           const Eigen::Vector4d* torque, std::size_t num_steps,
+                           const math::Vector4d* torque, std::size_t num_steps,
                            const simulation::TrajectorySpec& spec,
                            const simulation::LossSpec& loss, simulation::Trace& trace,
                            std::vector<StageData>* stage_cache);

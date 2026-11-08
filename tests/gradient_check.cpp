@@ -29,11 +29,11 @@ struct Inputs {
     Terrain terrain;
     simulation::State initial;
     std::vector<BaseState> base;
-    std::vector<Eigen::Vector4d> torque;
+    std::vector<math::Vector4d> torque;
     simulation::TrajectorySpec spec;
     simulation::LossSpec loss;
-    std::vector<Eigen::Vector4d> target_angle;
-    std::vector<Eigen::Vector4d> target_velocity;
+    std::vector<math::Vector4d> target_angle;
+    std::vector<math::Vector4d> target_velocity;
 };
 
 Inputs make_inputs(const Config& config) {
@@ -41,8 +41,8 @@ Inputs make_inputs(const Config& config) {
     inputs.model = ModelParameters::demo();
     inputs.terrain.slope_angle = 0.05;
     inputs.terrain.slope_direction = 0.7;
-    inputs.initial.angle = Eigen::Vector4d(0.20, -0.10, 0.15, 0.05);
-    inputs.initial.velocity = Eigen::Vector4d(0.30, -0.20, 0.10, -0.05);
+    inputs.initial.angle = math::Vector4d::from(0.20, -0.10, 0.15, 0.05);
+    inputs.initial.velocity = math::Vector4d::from(0.30, -0.20, 0.10, -0.05);
     inputs.spec.step = config.step;
     inputs.spec.refinement = config.refinement;
 
@@ -57,19 +57,21 @@ Inputs make_inputs(const Config& config) {
         base.yaw = 0.2 + 0.4 * time;
         base.yaw_rate = 0.4;
         base.yaw_acceleration = 0.3;
-        base.acceleration = Eigen::Vector3d(0.2, 0.15, 0.05);
+        base.acceleration[0] = 0.2;
+        base.acceleration[1] = 0.15;
+        base.acceleration[2] = 0.05;
         inputs.torque[k] =
-            config.torque_scale *
-            Eigen::Vector4d(0.20 + 0.01 * static_cast<double>(k),
-                            -0.12 + 0.008 * static_cast<double>(k), 0.06, -0.04);
+            math::Vector4d::from(0.20 + 0.01 * static_cast<double>(k),
+                                 -0.12 + 0.008 * static_cast<double>(k), 0.06, -0.04) *
+            config.torque_scale;
         for (int i = 0; i < 4; ++i) {
             inputs.target_angle[k][i] = 0.10 * std::sin(0.5 * time + 0.7 * i);
             inputs.target_velocity[k][i] = 0.20 * std::cos(0.3 * time + 0.4 * i);
         }
     }
-    inputs.loss.angle_weights = Eigen::Vector4d(1.0, 2.0, 0.8, 1.5);
-    inputs.loss.velocity_weights = Eigen::Vector4d(0.3, 0.5, 0.2, 0.4);
-    inputs.loss.torque_weights = Eigen::Vector4d(0.05, 0.05, 0.03, 0.03);
+    inputs.loss.angle_weights = math::Vector4d::from(1.0, 2.0, 0.8, 1.5);
+    inputs.loss.velocity_weights = math::Vector4d::from(0.3, 0.5, 0.2, 0.4);
+    inputs.loss.torque_weights = math::Vector4d::from(0.05, 0.05, 0.03, 0.03);
     inputs.loss.target_angle = inputs.target_angle.data();
     inputs.loss.target_velocity = inputs.target_velocity.data();
     return inputs;
@@ -209,7 +211,7 @@ bool check_parameter_layout() {
 double check_torque_gradient(const Inputs& inputs, bool verbose) {
     control_gradient::Workspace workspace;
     const std::size_t num_steps = inputs.base.size();
-    std::vector<Eigen::Vector4d> gradient(num_steps);
+    std::vector<math::Vector4d> gradient(num_steps);
     const double loss = control_gradient::simulateAndGradient(
         inputs.model, inputs.terrain, inputs.initial, inputs.base.data(), inputs.torque.data(),
         num_steps, inputs.spec, inputs.loss, workspace, gradient.data(), nullptr);
@@ -223,8 +225,8 @@ double check_torque_gradient(const Inputs& inputs, bool verbose) {
     for (std::size_t k = 0; k < num_steps; ++k) {
         for (int i = 0; i < 4; ++i) {
             const double step = 1e-6 * std::max(1.0, std::fabs(inputs.torque[k][i]));
-            std::vector<Eigen::Vector4d> plus = inputs.torque;
-            std::vector<Eigen::Vector4d> minus = inputs.torque;
+            std::vector<math::Vector4d> plus = inputs.torque;
+            std::vector<math::Vector4d> minus = inputs.torque;
             plus[k][i] += step;
             minus[k][i] -= step;
             simulation::Trace trace_plus;

@@ -6,8 +6,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
-
 add_library(gimbal_dynamics STATIC
     src/dynamics_model.cpp
     src/simulation.cpp
@@ -18,7 +16,6 @@ add_library(gimbal_dynamics STATIC
     src/parameter_gradient.cpp
 )
 target_include_directories(gimbal_dynamics PUBLIC include PRIVATE src)
-target_link_libraries(gimbal_dynamics PUBLIC Eigen3::Eigen)
 target_compile_options(gimbal_dynamics PRIVATE -Wall -Wextra)
 
 option(GIMBAL_DYNAMICS_BUILD_TESTS "构建校验程序" ON)
