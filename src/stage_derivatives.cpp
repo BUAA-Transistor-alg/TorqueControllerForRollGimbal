@@ -47,107 +47,6 @@ Array3 zero_vectors() {
     return result;
 }
 
-// 各刚体角速度、角加速度、质心加速度的方向导数
-struct KinematicsDirection {
-    Array3 omega;
-    Array3 alpha;
-    Array3 com_acceleration;
-
-    KinematicsDirection()
-        : omega(zero_vectors()), alpha(zero_vectors()), com_acceleration(zero_vectors()) {}
-};
-
-// 全量运动学方向导数：用于 q 方向与 q̇ 方向
-KinematicsDirection propagate_kinematics(const StageData& stage,
-                                         const std::array<double, 4>& delta_velocity,
-                                         const Array3& delta_offset, const Array3& delta_axis,
-                                         const Array3& delta_com_relative) {
-    const Chain<double>& chain = stage.chain;
-    KinematicsDirection result;
-
-    Vector3d previous_omega = chain.normal * stage.base.yaw_rate;
-    Vector3d previous_alpha = chain.normal * stage.base.yaw_acceleration;
-    Vector3d previous_origin_acceleration = stage.base.acceleration;
-    Vector3d delta_previous_omega = Vector3d::zero();
-    Vector3d delta_previous_alpha = Vector3d::zero();
-    Vector3d delta_previous_origin_acceleration = Vector3d::zero();
-    for (int i = 0; i < 4; ++i) {
-        const Vector3d& offset = chain.offset[i];
-        const Vector3d& axis = chain.axis[i];
-        const Vector3d& delta_offset_i = delta_offset[i];
-        const Vector3d& delta_axis_i = delta_axis[i];
-        const double velocity = stage.qdot[i];
-        const double delta_velocity_i = delta_velocity[i];
-
-        const Vector3d delta_omega =
-            delta_previous_omega + delta_axis_i * velocity + axis * delta_velocity_i;
-        const Vector3d delta_alpha =
-            delta_previous_alpha + cross_product(delta_previous_omega, axis * velocity) +
-            cross_product(previous_omega, delta_axis_i * velocity + axis * delta_velocity_i);
-        const Vector3d origin_acceleration =
-            previous_origin_acceleration + cross_product(previous_alpha, offset) +
-            cross_product(previous_omega, cross_product(previous_omega, offset));
-        const Vector3d delta_origin_acceleration =
-            delta_previous_origin_acceleration + cross_product(delta_previous_alpha, offset) +
-            cross_product(previous_alpha, delta_offset_i) +
-            cross_product(delta_previous_omega, cross_product(previous_omega, offset)) +
-            cross_product(previous_omega, cross_product(delta_previous_omega, offset)) +
-            cross_product(previous_omega, cross_product(previous_omega, delta_offset_i));
-        const Vector3d com_relative = chain.com[i] - chain.joint_origin[i];
-        const Vector3d& delta_com_relative_i = delta_com_relative[i];
-        const Vector3d angular_velocity = previous_omega + axis * velocity;
-        const Vector3d angular_acceleration =
-            previous_alpha + cross_product(previous_omega, axis * velocity);
-        const Vector3d delta_com_acceleration =
-            delta_origin_acceleration + cross_product(delta_alpha, com_relative) +
-            cross_product(angular_acceleration, delta_com_relative_i) +
-            cross_product(delta_omega, cross_product(angular_velocity, com_relative)) +
-            cross_product(angular_velocity, cross_product(delta_omega, com_relative)) +
-            cross_product(angular_velocity, cross_product(angular_velocity, delta_com_relative_i));
-
-        result.omega[i] = delta_omega;
-        result.alpha[i] = delta_alpha;
-        result.com_acceleration[i] = delta_com_acceleration;
-        previous_omega = angular_velocity;
-        previous_alpha = angular_acceleration;
-        previous_origin_acceleration = origin_acceleration;
-        delta_previous_omega = delta_omega;
-        delta_previous_alpha = delta_alpha;
-        delta_previous_origin_acceleration = delta_origin_acceleration;
-    }
-    return result;
-}
-
-// 刚体质心参数方向：只有质心加速度的方向导数非零
-KinematicsDirection com_kinematics(const StageData& stage, int body,
-                                   const Vector3d& delta_com_relative) {
-    KinematicsDirection result;
-    const Vector3d& omega = stage.bias_internals.omega[body];
-    const Vector3d& alpha = stage.bias_internals.alpha[body];
-    result.com_acceleration[body] = cross_product(alpha, delta_com_relative) +
-                                    cross_product(omega, cross_product(omega, delta_com_relative));
-    return result;
-}
-
-// 关节安装偏置方向：各刚体质心加速度方向导数等于原点加速度方向导数
-KinematicsDirection offset_kinematics(const StageData& stage, int joint,
-                                      const Vector3d& delta_offset) {
-    KinematicsDirection result;
-    const Vector3d previous_omega = (joint == 0)
-        ? stage.chain.normal * stage.base.yaw_rate
-        : stage.bias_internals.omega[joint - 1];
-    const Vector3d previous_alpha = (joint == 0)
-        ? stage.chain.normal * stage.base.yaw_acceleration
-        : stage.bias_internals.alpha[joint - 1];
-    const Vector3d origin_acceleration =
-        cross_product(previous_alpha, delta_offset) +
-        cross_product(previous_omega, cross_product(previous_omega, delta_offset));
-    for (int i = joint; i < 4; ++i) {
-        result.com_acceleration[i] = origin_acceleration;
-    }
-    return result;
-}
-
 ArrayMatrix zero_matrices() {
     ArrayMatrix result;
     for (int i = 0; i < 4; ++i) {
@@ -156,57 +55,448 @@ ArrayMatrix zero_matrices() {
     return result;
 }
 
-// 由各刚体的加速度、角速度、角加速度与惯量方向导数求偏置力方向导数
-Vector4d evaluate_bias_direction(const ScalarModelParameters<double>& model, const StageData& stage,
-                                 const KinematicsDirection& kinematics,
-                                 const ArrayMatrix& delta_inertia_world,
-                                 const Array3& delta_com_relative, const Array3& delta_offset,
-                                 const Array3& delta_axis) {
+// ---- 方向维批处理：数据按 [刚体][分量][方向] 存放，方向维连续 ----
+
+// out = a × v（a 为方向批次，v 为固定向量）
+template <int N>
+void cross_batch_vector(const double a[3][N], const Vector3d& v, double out[3][N]) {
+    for (int d = 0; d < N; ++d) {
+        out[0][d] = a[1][d] * v[2] - a[2][d] * v[1];
+        out[1][d] = a[2][d] * v[0] - a[0][d] * v[2];
+        out[2][d] = a[0][d] * v[1] - a[1][d] * v[0];
+    }
+}
+
+// out = v × a（a 为方向批次，v 为固定向量）
+template <int N>
+void cross_vector_batch(const Vector3d& v, const double a[3][N], double out[3][N]) {
+    for (int d = 0; d < N; ++d) {
+        out[0][d] = v[1] * a[2][d] - v[2] * a[1][d];
+        out[1][d] = v[2] * a[0][d] - v[0] * a[2][d];
+        out[2][d] = v[0] * a[1][d] - v[1] * a[0][d];
+    }
+}
+
+// out += a
+template <int N>
+void add_batch(double out[3][N], const double a[3][N]) {
+    for (int c = 0; c < 3; ++c) {
+        for (int d = 0; d < N; ++d) {
+            out[c][d] += a[c][d];
+        }
+    }
+}
+
+// out = a + b + c（三项求和，减少临时量写法）
+template <int N>
+void sum3_batch(const double a[3][N], const double b[3][N], const double c[3][N],
+                double out[3][N]) {
+    for (int component = 0; component < 3; ++component) {
+        for (int d = 0; d < N; ++d) {
+            out[component][d] = a[component][d] + b[component][d] + c[component][d];
+        }
+    }
+}
+
+// out = v * row（外积）
+template <int N>
+void outer_batch(const Vector3d& v, const double row[N], double out[3][N]) {
+    for (int component = 0; component < 3; ++component) {
+        for (int d = 0; d < N; ++d) {
+            out[component][d] = v[component] * row[d];
+        }
+    }
+}
+
+// out = s * a
+template <int N>
+void scale_batch(const double a[3][N], double scale, double out[3][N]) {
+    for (int component = 0; component < 3; ++component) {
+        for (int d = 0; d < N; ++d) {
+            out[component][d] = scale * a[component][d];
+        }
+    }
+}
+
+// 方向种子批次
+template <int N>
+struct SeedBatch {
+    double axis[4][3][N];
+    double offset[4][3][N];
+    double origin[4][3][N];
+    double com[4][3][N];
+    double com_relative[4][3][N];
+    double velocity[4][N];
+    double inertia_alpha[4][3][N];
+    double inertia_omega[4][3][N];
+    double inertia_world[4][4][3][3];  // [body][q 方向][3][3]
+};
+
+template <int N>
+void zero_seed_batch(SeedBatch<N>& seed) {
+    for (int body = 0; body < 4; ++body) {
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                seed.axis[body][component][d] = 0.0;
+                seed.offset[body][component][d] = 0.0;
+                seed.origin[body][component][d] = 0.0;
+                seed.com[body][component][d] = 0.0;
+                seed.com_relative[body][component][d] = 0.0;
+                seed.inertia_alpha[body][component][d] = 0.0;
+                seed.inertia_omega[body][component][d] = 0.0;
+            }
+        }
+        for (int d = 0; d < N; ++d) {
+            seed.velocity[body][d] = 0.0;
+        }
+        for (int k = 0; k < 4; ++k) {
+            for (int row = 0; row < 3; ++row) {
+                for (int column = 0; column < 3; ++column) {
+                    seed.inertia_world[body][k][row][column] = 0.0;
+                }
+            }
+        }
+    }
+}
+
+// 构造方向种子批次
+template <int N>
+SeedBatch<N> build_seed_batch(const StageData& stage,
+                              const ScalarModelParameters<double>& model) {
+    const Chain<double>& chain = stage.chain;
     const BiasInternals<double>& internals = stage.bias_internals;
-    Array3 delta_force = zero_vectors();
-    Array3 delta_couple = zero_vectors();
-    for (int i = 0; i < 4; ++i) {
-        const Matrix3d& inertia_world = stage.mass_internals.inertia_world[i];
-        delta_force[i] = model.bodies[i].mass * kinematics.com_acceleration[i];
-        delta_couple[i] = delta_inertia_world[i] * internals.alpha[i] +
-                          inertia_world * kinematics.alpha[i] +
-                          cross_product(kinematics.omega[i], inertia_world * internals.omega[i]) +
-                          cross_product(internals.omega[i],
-                                        delta_inertia_world[i] * internals.omega[i] +
-                                            inertia_world * kinematics.omega[i]);
+    SeedBatch<N> seed;
+    zero_seed_batch(seed);
+    const Matrix3d base_rotation =
+        chain.rotation[0] * transpose(local_rotation(0, stage.angle[0]));
+
+    // 广义坐标方向 0..3
+    for (int k = 0; k < 4; ++k) {
+        const Matrix3d axis_skew = skew_matrix(axis_local<double>(k));
+        ArrayMatrix delta_rotation = zero_matrices();
+        for (int i = k; i < 4; ++i) {
+            delta_rotation[i] = chain.rotation[k] * axis_skew *
+                                transpose(chain.rotation[k]) * chain.rotation[i];
+        }
+        Array3 delta_offset = zero_vectors();
+        for (int m = 1; m < 4; ++m) {
+            if (k < m) {
+                delta_offset[m] = delta_rotation[m - 1] * model.joint_offsets[m];
+            }
+        }
+        Array3 delta_origin = zero_vectors();
+        for (int i = 0; i < 4; ++i) {
+            for (int m = 0; m <= i; ++m) {
+                delta_origin[i] += delta_offset[m];
+            }
+        }
+        Array3 delta_axis = zero_vectors();
+        for (int j = 1; j < 4; ++j) {
+            delta_axis[j] = delta_rotation[j - 1] * axis_local<double>(j);
+        }
+        Array3 delta_com_relative = zero_vectors();
+        Array3 delta_com = zero_vectors();
+        for (int i = 0; i < 4; ++i) {
+            delta_com_relative[i] = delta_rotation[i] * model.bodies[i].com;
+            delta_com[i] = delta_origin[i] + delta_com_relative[i];
+        }
+        for (int i = 0; i < 4; ++i) {
+            for (int component = 0; component < 3; ++component) {
+                seed.axis[i][component][k] = delta_axis[i][component];
+                seed.offset[i][component][k] = delta_offset[i][component];
+                seed.origin[i][component][k] = delta_origin[i][component];
+                seed.com[i][component][k] = delta_com[i][component];
+                seed.com_relative[i][component][k] = delta_com_relative[i][component];
+            }
+            const Matrix3d delta_inertia_world =
+                delta_rotation[i] * model.bodies[i].inertia *
+                    transpose(chain.rotation[i]) +
+                chain.rotation[i] * model.bodies[i].inertia *
+                    transpose(delta_rotation[i]);
+            for (int row = 0; row < 3; ++row) {
+                for (int column = 0; column < 3; ++column) {
+                    seed.inertia_world[i][k][row][column] = delta_inertia_world(row, column);
+                }
+                double alpha = 0.0;
+                double omega = 0.0;
+                for (int l = 0; l < 3; ++l) {
+                    alpha += delta_inertia_world(row, l) * internals.alpha[i][l];
+                    omega += delta_inertia_world(row, l) * internals.omega[i][l];
+                }
+                seed.inertia_alpha[i][row][k] = alpha;
+                seed.inertia_omega[i][row][k] = omega;
+            }
+        }
     }
 
-    Vector4d result = Vector4d::zero();
-    Vector3d child_force = Vector3d::zero();
-    Vector3d child_moment = Vector3d::zero();
-    for (int i = 3; i >= 0; --i) {
-        const Vector3d com_relative = stage.chain.com[i] - stage.chain.joint_origin[i];
-        Vector3d moment = delta_couple[i] +
-                          cross_product(delta_com_relative[i], internals.force[i]) +
-                          cross_product(com_relative, delta_force[i]);
-        if (i < 3) {
-            moment += child_moment +
-                      cross_product(delta_offset[i + 1], internals.joint_force[i + 1]) +
-                      cross_product(stage.chain.offset[i + 1], child_force);
+    // 广义速度方向 4..7
+    for (int i = 0; i < 4 && 4 + i < N; ++i) {
+        seed.velocity[i][4 + i] = 1.0;
+    }
+
+    if constexpr (N > kStateDirectionCount) {
+        // 刚体质心方向 8..19
+        for (int body = 0; body < 4; ++body) {
+            for (int component = 0; component < 3; ++component) {
+                const int direction = kStateDirectionCount + 3 * body + component;
+                Vector3d unit = Vector3d::zero();
+                unit[component] = 1.0;
+                const Vector3d derivative = chain.rotation[body] * unit;
+                for (int c = 0; c < 3; ++c) {
+                    seed.com_relative[body][c][direction] = derivative[c];
+                    seed.com[body][c][direction] = derivative[c];
+                }
+            }
         }
-        result[i] = dot_product(delta_axis[i], internals.joint_moment[i]) +
-                    dot_product(stage.chain.axis[i], moment);
-        child_force = delta_force[i] + child_force;
-        child_moment = moment;
+        // 关节安装偏置方向 20..31
+        for (int joint = 0; joint < 4; ++joint) {
+            const Matrix3d& parent_rotation =
+                (joint == 0) ? base_rotation : chain.rotation[joint - 1];
+            for (int component = 0; component < 3; ++component) {
+                const int direction = 20 + 3 * joint + component;
+                Vector3d unit = Vector3d::zero();
+                unit[component] = 1.0;
+                const Vector3d derivative = parent_rotation * unit;
+                for (int c = 0; c < 3; ++c) {
+                    seed.offset[joint][c][direction] = derivative[c];
+                    for (int i = joint; i < 4; ++i) {
+                        seed.origin[i][c][direction] = derivative[c];
+                        seed.com[i][c][direction] = derivative[c];
+                    }
+                }
+            }
+        }
+    }
+    return seed;
+}
+
+// 各刚体角速度、角加速度、质心加速度的方向导数批次
+template <int N>
+struct KinematicsBatch {
+    double omega[4][3][N];
+    double alpha[4][3][N];
+    double com_acceleration[4][3][N];
+};
+
+// 全量运动学方向导数：逐方向独立计算，按方向维展开为连续的浮点运算
+template <int N>
+KinematicsBatch<N> propagate_kinematics(const StageData& stage, const SeedBatch<N>& seed) {
+    const Chain<double>& chain = stage.chain;
+    const BiasInternals<double>& internals = stage.bias_internals;
+    KinematicsBatch<N> result;
+
+    Vector3d previous_omega = chain.normal * stage.base.yaw_rate;
+    Vector3d previous_alpha = chain.normal * stage.base.yaw_acceleration;
+    Vector3d previous_origin_acceleration = stage.base.acceleration;
+    double delta_previous_omega[3][N] = {};
+    double delta_previous_alpha[3][N] = {};
+    double delta_previous_origin_acceleration[3][N] = {};
+    double temp1[3][N];
+    double temp2[3][N];
+    double temp3[3][N];
+
+    for (int i = 0; i < 4; ++i) {
+        const Vector3d& offset = chain.offset[i];
+        const Vector3d& axis = chain.axis[i];
+        const double velocity = stage.qdot[i];
+
+        // axis_direction = δa_i q̇_i + a_i δq̇_i
+        double axis_direction[3][N];
+        {
+            const Vector3d axis_velocity = axis * velocity;
+            for (int component = 0; component < 3; ++component) {
+                for (int d = 0; d < N; ++d) {
+                    axis_direction[component][d] =
+                        seed.axis[i][component][d] * velocity + axis[component] * seed.velocity[i][d];
+                }
+            }
+            (void)axis_velocity;
+        }
+        // δω_i = δω_{i-1} + axis_direction
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                result.omega[i][component][d] =
+                    delta_previous_omega[component][d] + axis_direction[component][d];
+            }
+        }
+        // δα_i = δα_{i-1} + δω_{i-1} × (a_i q̇_i) + ω_{i-1} × axis_direction
+        cross_batch_vector(delta_previous_omega, axis * velocity, temp1);
+        cross_vector_batch(previous_omega, axis_direction, temp2);
+        sum3_batch(delta_previous_alpha, temp1, temp2, result.alpha[i]);
+
+        // 基础量递推（固定向量）
+        const Vector3d origin_acceleration =
+            previous_origin_acceleration + cross_product(previous_alpha, offset) +
+            cross_product(previous_omega, cross_product(previous_omega, offset));
+        const Vector3d omega_cross_offset = cross_product(previous_omega, offset);
+
+        // δa_p = δa_p_{i-1} + δα_{i-1} × r + α_{i-1} × δr
+        //        + δω_{i-1} × (ω × r) + ω × (δω_{i-1} × r) + ω × (ω × δr)
+        cross_batch_vector(delta_previous_alpha, offset, temp1);
+        cross_vector_batch(previous_alpha, seed.offset[i], temp2);
+        double delta_origin_acceleration[3][N];
+        sum3_batch(delta_previous_origin_acceleration, temp1, temp2, delta_origin_acceleration);
+        cross_batch_vector(delta_previous_omega, omega_cross_offset, temp1);
+        cross_batch_vector(delta_previous_omega, offset, temp2);
+        cross_vector_batch(previous_omega, temp2, temp3);
+        add_batch(delta_origin_acceleration, temp1);
+        add_batch(delta_origin_acceleration, temp3);
+        cross_vector_batch(previous_omega, seed.offset[i], temp2);
+        cross_vector_batch(previous_omega, temp2, temp3);
+        add_batch(delta_origin_acceleration, temp3);
+
+        // δa_g = δa_p + δα_i × c + α_i × δc
+        //        + δω_i × (ω_i × c) + ω_i × (δω_i × c) + ω_i × (ω_i × δc)
+        const Vector3d com_relative = chain.com[i] - chain.joint_origin[i];
+        const Vector3d omega_cross_com = cross_product(internals.omega[i], com_relative);
+        cross_batch_vector(result.alpha[i], com_relative, temp1);
+        cross_vector_batch(internals.alpha[i], seed.com_relative[i], temp2);
+        sum3_batch(delta_origin_acceleration, temp1, temp2, result.com_acceleration[i]);
+        cross_batch_vector(result.omega[i], omega_cross_com, temp1);
+        cross_batch_vector(result.omega[i], com_relative, temp2);
+        cross_vector_batch(internals.omega[i], temp2, temp3);
+        add_batch(result.com_acceleration[i], temp1);
+        add_batch(result.com_acceleration[i], temp3);
+        cross_vector_batch(internals.omega[i], seed.com_relative[i], temp2);
+        cross_vector_batch(internals.omega[i], temp2, temp3);
+        add_batch(result.com_acceleration[i], temp3);
+
+        previous_omega = internals.omega[i];
+        previous_alpha = internals.alpha[i];
+        previous_origin_acceleration = origin_acceleration;
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                delta_previous_omega[component][d] = result.omega[i][component][d];
+                delta_previous_alpha[component][d] = result.alpha[i][component][d];
+                delta_previous_origin_acceleration[component][d] =
+                    delta_origin_acceleration[component][d];
+            }
+        }
     }
     return result;
+}
+
+// 偏置力方向导数的批处理：由运动学方向导数批次求各关节方向导数
+template <int N>
+void evaluate_bias_direction_batch(const ScalarModelParameters<double>& model, const StageData& stage,
+                                   const SeedBatch<N>& seed, const KinematicsBatch<N>& kinematics,
+                                   double delta_bias[4][N]) {
+    const BiasInternals<double>& internals = stage.bias_internals;
+    double delta_force[4][3][N];
+    double delta_couple[4][3][N];
+    double temp1[3][N];
+    double temp2[3][N];
+    double temp3[3][N];
+
+    for (int i = 0; i < 4; ++i) {
+        const Matrix3d& inertia_world = stage.mass_internals.inertia_world[i];
+        const double body_mass = model.bodies[i].mass;
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                delta_force[i][component][d] = body_mass * kinematics.com_acceleration[i][component][d];
+            }
+        }
+        // δN = δI_w α + I_w δα + δω × (I_w ω) + ω × (δI_w ω + I_w δω)
+        const Vector3d inertia_world_omega = inertia_world * internals.omega[i];
+        cross_batch_vector(kinematics.omega[i], inertia_world_omega, temp1);
+        double inertia_alpha[3][N];
+        double inertia_omega[3][N];
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                double alpha_value = 0.0;
+                double omega_value = 0.0;
+                for (int l = 0; l < 3; ++l) {
+                    alpha_value += inertia_world(component, l) * kinematics.alpha[i][l][d];
+                    omega_value += inertia_world(component, l) * kinematics.omega[i][l][d];
+                }
+                inertia_alpha[component][d] = alpha_value;
+                inertia_omega[component][d] = omega_value;
+            }
+        }
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                temp2[component][d] = seed.inertia_omega[i][component][d] + inertia_omega[component][d];
+            }
+        }
+        cross_vector_batch(internals.omega[i], temp2, temp3);
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                delta_couple[i][component][d] = seed.inertia_alpha[i][component][d] +
+                                                inertia_alpha[component][d] +
+                                                temp1[component][d] + temp3[component][d];
+            }
+        }
+    }
+
+    double child_force[3][N] = {};
+    double child_moment[3][N] = {};
+    for (int i = 3; i >= 0; --i) {
+        const Vector3d com_relative = stage.chain.com[i] - stage.chain.joint_origin[i];
+        // δm = δN + δc × F + c × δF
+        cross_batch_vector(seed.com_relative[i], internals.force[i], temp1);
+        cross_vector_batch(com_relative, delta_force[i], temp2);
+        double moment[3][N];
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                moment[component][d] = delta_couple[i][component][d] + temp1[component][d] +
+                                       temp2[component][d];
+            }
+        }
+        if (i < 3) {
+            cross_batch_vector(seed.offset[i + 1], internals.joint_force[i + 1], temp1);
+            cross_vector_batch(stage.chain.offset[i + 1], child_force, temp2);
+            for (int component = 0; component < 3; ++component) {
+                for (int d = 0; d < N; ++d) {
+                    moment[component][d] += child_moment[component][d] + temp1[component][d] +
+                                            temp2[component][d];
+                }
+            }
+        }
+        const Vector3d& axis = stage.chain.axis[i];
+        const Vector3d& joint_moment = internals.joint_moment[i];
+        for (int d = 0; d < N; ++d) {
+            double value = 0.0;
+            for (int component = 0; component < 3; ++component) {
+                value += seed.axis[i][component][d] * joint_moment[component] +
+                         axis[component] * moment[component][d];
+            }
+            delta_bias[i][d] = value;
+        }
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                child_force[component][d] += delta_force[i][component][d];
+                child_moment[component][d] = moment[component][d];
+            }
+        }
+    }
+}
+
+// 从批次中取出第 direction 个方向的 3 维向量组
+template <int N>
+Array3 extract_vectors(const double field[4][3][N], int direction) {
+    Array3 result;
+    for (int i = 0; i < 4; ++i) {
+        result[i] = Vector3d::from(field[i][0][direction], field[i][1][direction],
+                                   field[i][2][direction]);
+    }
+    return result;
+}
+
+template <int N>
+Vector3d extract_vector(const double field[3][N], int direction) {
+    return Vector3d::from(field[0][direction], field[1][direction], field[2][direction]);
 }
 
 // 全量质量矩阵方向导数（q 方向）
 Matrix4d evaluate_mass_direction(const StageData& stage, const ScalarModelParameters<double>& model,
                                  const Array3& delta_axis, const Array3& delta_com,
-                                 const Array3& delta_origin, const ArrayMatrix& delta_rotation) {
+                                 const Array3& delta_origin,
+                                 const ArrayMatrix& delta_inertia_world) {
     Matrix4d mass_derivative = Matrix4d::zero();
     for (int i = 0; i < 4; ++i) {
         const Matrix34d& velocity_jacobian = stage.mass_internals.velocity_jacobian[i];
         const Matrix34d& angular_jacobian = stage.mass_internals.angular_jacobian[i];
         const Matrix3d& inertia_world = stage.mass_internals.inertia_world[i];
-
         Matrix34d velocity_jacobian_derivative = Matrix34d::zero();
         Matrix34d angular_jacobian_derivative = Matrix34d::zero();
         for (int joint = 0; joint <= i; ++joint) {
@@ -219,20 +509,13 @@ Matrix4d evaluate_mass_direction(const StageData& stage, const ScalarModelParame
                 angular_jacobian_derivative(row, joint) = delta_axis[joint][row];
             }
         }
-        const Matrix3d& inertia = model.bodies[i].inertia;
-        const Matrix3d delta_inertia_world =
-            delta_rotation[i] * inertia * transpose(stage.chain.rotation[i]) +
-            stage.chain.rotation[i] * inertia * transpose(delta_rotation[i]);
+        mass_derivative += model.bodies[i].mass *
+                           (transpose(velocity_jacobian_derivative) * velocity_jacobian +
+                            transpose(velocity_jacobian) * velocity_jacobian_derivative);
+        mass_derivative += transpose(angular_jacobian_derivative) * inertia_world * angular_jacobian;
         mass_derivative +=
-            model.bodies[i].mass *
-            (transpose(velocity_jacobian_derivative) * velocity_jacobian +
-             transpose(velocity_jacobian) * velocity_jacobian_derivative);
-        mass_derivative +=
-            transpose(angular_jacobian_derivative) * inertia_world * angular_jacobian;
-        mass_derivative +=
-            transpose(angular_jacobian) * delta_inertia_world * angular_jacobian;
-        mass_derivative +=
-            transpose(angular_jacobian) * inertia_world * angular_jacobian_derivative;
+            transpose(angular_jacobian) * delta_inertia_world[i] * angular_jacobian;
+        mass_derivative += transpose(angular_jacobian) * inertia_world * angular_jacobian_derivative;
     }
     return mass_derivative;
 }
@@ -268,10 +551,9 @@ Matrix4d evaluate_mass_direction_offset(const StageData& stage,
                 velocity_jacobian_derivative(row, smaller) = column[row];
             }
         }
-        mass_derivative +=
-            model.bodies[i].mass *
-            (transpose(velocity_jacobian_derivative) * velocity_jacobian +
-             transpose(velocity_jacobian) * velocity_jacobian_derivative);
+        mass_derivative += model.bodies[i].mass *
+                           (transpose(velocity_jacobian_derivative) * velocity_jacobian +
+                            transpose(velocity_jacobian) * velocity_jacobian_derivative);
     }
     return mass_derivative;
 }
@@ -300,7 +582,6 @@ void mass_parameter_direction(const StageData& stage, const ScalarModelParameter
                               int body, Matrix4d& mass_derivative, Vector4d& bias_derivative) {
     const Matrix34d& velocity_jacobian = stage.mass_internals.velocity_jacobian[body];
     mass_derivative = transpose(velocity_jacobian) * velocity_jacobian;
-
     Array3 delta_force;
     Array3 delta_couple;
     for (int i = 0; i < 4; ++i) {
@@ -326,11 +607,8 @@ void inertia_parameter_direction(const StageData& stage, int body, int entry,
     }
     const Matrix3d& rotation = stage.chain.rotation[body];
     const Matrix3d inertia_world_direction = rotation * inertia_direction * transpose(rotation);
-
     const Matrix34d& angular_jacobian = stage.mass_internals.angular_jacobian[body];
-    mass_derivative =
-        transpose(angular_jacobian) * inertia_world_direction * angular_jacobian;
-
+    mass_derivative = transpose(angular_jacobian) * inertia_world_direction * angular_jacobian;
     Array3 delta_force;
     Array3 delta_couple;
     for (int i = 0; i < 4; ++i) {
@@ -363,118 +641,54 @@ struct DirectionDerivatives {
     std::array<Vector4d, N> bias{};
 };
 
-// 按方向类型分别求值：q 与 q̇ 方向做全量运动学传播，
-// 质心与偏置方向走只含必要项的短路径。
+// 由批次取出第 direction 个方向的质量矩阵方向导数
+template <int N>
+Matrix4d evaluate_direction_mass(const StageData& stage, const ScalarModelParameters<double>& model,
+                                 const SeedBatch<N>& seed, int direction) {
+    if (direction < 4) {
+        const Array3 delta_axis = extract_vectors(seed.axis, direction);
+        const Array3 delta_com = extract_vectors(seed.com, direction);
+        const Array3 delta_origin = extract_vectors(seed.origin, direction);
+        ArrayMatrix delta_inertia_world = zero_matrices();
+        for (int i = 0; i < 4; ++i) {
+            for (int row = 0; row < 3; ++row) {
+                for (int column = 0; column < 3; ++column) {
+                    delta_inertia_world[i](row, column) =
+                        seed.inertia_world[i][direction][row][column];
+                }
+            }
+        }
+        return evaluate_mass_direction(stage, model, delta_axis, delta_com, delta_origin,
+                                       delta_inertia_world);
+    }
+    if (direction < kStateDirectionCount) {
+        return Matrix4d::zero();
+    }
+    if (direction < 20) {
+        const int body = (direction - kStateDirectionCount) / 3;
+        const Vector3d delta_com_relative = extract_vector(seed.com_relative[body], direction);
+        return evaluate_mass_direction_com(stage, model, body, delta_com_relative);
+    }
+    const int joint = (direction - 20) / 3;
+    const Vector3d delta_offset = extract_vector(seed.offset[joint], direction);
+    return evaluate_mass_direction_offset(stage, model, joint, delta_offset);
+}
+
+// 批量求全部方向的质量矩阵与偏置力方向导数
 template <int N>
 DirectionDerivatives<N> evaluate_directions(const StageData& stage,
                                             const ScalarModelParameters<double>& model) {
-    const Chain<double>& chain = stage.chain;
+    const SeedBatch<N> seed = build_seed_batch<N>(stage, model);
+    const KinematicsBatch<N> kinematics = propagate_kinematics<N>(stage, seed);
+    double delta_bias[4][N];
+    evaluate_bias_direction_batch<N>(model, stage, seed, kinematics, delta_bias);
+
     DirectionDerivatives<N> result;
-    for (int d = 0; d < N; ++d) {
-        result.mass[d].setZero();
-        result.bias[d].setZero();
-    }
-    const Array3 zero_vectors_value = zero_vectors();
-    const ArrayMatrix zero_matrices_value = zero_matrices();
-    const std::array<double, 4> zero_angles = {0.0, 0.0, 0.0, 0.0};
-
-    // 广义坐标方向 0..3
-    for (int k = 0; k < 4 && k < N; ++k) {
-        const Matrix3d axis_skew = skew_matrix(axis_local<double>(k));
-        ArrayMatrix delta_rotation = zero_matrices_value;
-        for (int i = k; i < 4; ++i) {
-            delta_rotation[i] = chain.rotation[k] * axis_skew *
-                                transpose(chain.rotation[k]) * chain.rotation[i];
-        }
-        Array3 delta_offset = zero_vectors_value;
-        for (int m = 1; m < 4; ++m) {
-            if (k < m) {
-                delta_offset[m] = delta_rotation[m - 1] * model.joint_offsets[m];
-            }
-        }
-        Array3 delta_origin = zero_vectors_value;
-        for (int i = 0; i < 4; ++i) {
-            for (int m = 0; m <= i; ++m) {
-                delta_origin[i] += delta_offset[m];
-            }
-        }
-        Array3 delta_axis = zero_vectors_value;
-        for (int j = 1; j < 4; ++j) {
-            delta_axis[j] = delta_rotation[j - 1] * axis_local<double>(j);
-        }
-        Array3 delta_com_relative = zero_vectors_value;
-        Array3 delta_com = zero_vectors_value;
-        for (int i = 0; i < 4; ++i) {
-            delta_com_relative[i] = delta_rotation[i] * model.bodies[i].com;
-            delta_com[i] = delta_origin[i] + delta_com_relative[i];
-        }
-        const KinematicsDirection kinematics =
-            propagate_kinematics(stage, zero_angles, delta_offset, delta_axis, delta_com_relative);
-        ArrayMatrix delta_inertia_world = zero_matrices_value;
-        for (int i = 0; i < 4; ++i) {
-            delta_inertia_world[i] =
-                delta_rotation[i] * model.bodies[i].inertia * transpose(chain.rotation[i]) +
-                chain.rotation[i] * model.bodies[i].inertia * transpose(delta_rotation[i]);
-        }
-        result.bias[k] = evaluate_bias_direction(model, stage, kinematics, delta_inertia_world,
-                                                 delta_com_relative, delta_offset, delta_axis);
-        result.mass[k] = evaluate_mass_direction(stage, model, delta_axis, delta_com, delta_origin,
-                                                 delta_rotation);
-    }
-
-    // 广义速度方向 4..7：链不变，质量矩阵导数为零
-    for (int k = 0; k < 4 && 4 + k < N; ++k) {
-        std::array<double, 4> delta_velocity = zero_angles;
-        delta_velocity[k] = 1.0;
-        const KinematicsDirection kinematics =
-            propagate_kinematics(stage, delta_velocity, zero_vectors_value, zero_vectors_value,
-                                 zero_vectors_value);
-        result.bias[4 + k] = evaluate_bias_direction(model, stage, kinematics, zero_matrices_value,
-                                                     zero_vectors_value, zero_vectors_value,
-                                                     zero_vectors_value);
-    }
-
-    if constexpr (N > kStateDirectionCount) {
-        // 刚体质心方向 8..19
-        for (int body = 0; body < 4; ++body) {
-            for (int component = 0; component < 3; ++component) {
-                const int direction = kStateDirectionCount + 3 * body + component;
-                Vector3d unit = Vector3d::zero();
-                unit[component] = 1.0;
-                const Vector3d delta_com_relative = chain.rotation[body] * unit;
-                Array3 delta_com = zero_vectors_value;
-                delta_com[body] = delta_com_relative;
-                const KinematicsDirection kinematics =
-                    com_kinematics(stage, body, delta_com_relative);
-                result.bias[direction] = evaluate_bias_direction(
-                    model, stage, kinematics, zero_matrices_value, delta_com, zero_vectors_value,
-                    zero_vectors_value);
-                result.mass[direction] =
-                    evaluate_mass_direction_com(stage, model, body, delta_com_relative);
-            }
-        }
-        // 关节安装偏置方向 20..31
-        const Matrix3d base_rotation =
-            chain.rotation[0] * transpose(local_rotation(0, stage.angle[0]));
-        for (int joint = 0; joint < 4; ++joint) {
-            const Matrix3d& parent_rotation =
-                (joint == 0) ? base_rotation : chain.rotation[joint - 1];
-            for (int component = 0; component < 3; ++component) {
-                const int direction = 20 + 3 * joint + component;
-                Vector3d unit = Vector3d::zero();
-                unit[component] = 1.0;
-                const Vector3d delta_offset_value = parent_rotation * unit;
-                Array3 delta_offset = zero_vectors_value;
-                delta_offset[joint] = delta_offset_value;
-                const KinematicsDirection kinematics =
-                    offset_kinematics(stage, joint, delta_offset_value);
-                result.bias[direction] = evaluate_bias_direction(
-                    model, stage, kinematics, zero_matrices_value, zero_vectors_value, delta_offset,
-                    zero_vectors_value);
-                result.mass[direction] =
-                    evaluate_mass_direction_offset(stage, model, joint, delta_offset_value);
-            }
-        }
+    for (int direction = 0; direction < N; ++direction) {
+        result.bias[direction] =
+            Vector4d::from(delta_bias[0][direction], delta_bias[1][direction],
+                           delta_bias[2][direction], delta_bias[3][direction]);
+        result.mass[direction] = evaluate_direction_mass<N>(stage, model, seed, direction);
     }
     return result;
 }
@@ -572,5 +786,7 @@ ParameterJacobian evaluate_parameter_jacobian(const StageData& stage,
 
 }  // namespace detail
 }  // namespace gimbal
+
+
 
 
