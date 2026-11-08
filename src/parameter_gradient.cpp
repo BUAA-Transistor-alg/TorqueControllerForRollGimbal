@@ -18,7 +18,7 @@ void Workspace::release() {
     trace.release();
 }
 
-double simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain,
+Real simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain,
                               const simulation::State& initial, const BaseState* base,
                               const math::Vector4d* torque, std::size_t num_steps,
                               const simulation::TrajectorySpec& spec,
@@ -26,13 +26,13 @@ double simulateAndSensitivity(const ModelParameters& model, const Terrain& terra
                               Gradient* gradient, simulation::State* final_state) {
     simulation::validate(spec, num_steps);
     workspace.resize(num_steps, spec.refinement);
-    const double h = spec.step / static_cast<double>(spec.refinement);
-    const detail::ScalarModelParameters<double> scalar_model = detail::convert_model<double>(model);
+    const Real h = spec.step / static_cast<Real>(spec.refinement);
+    const detail::ScalarModelParameters<Real> scalar_model = detail::convert_model<Real>(model);
 
     // 单遍完成前向仿真、阶段 Jacobian 与灵敏度传播；
     // 每个主步结束时用当前灵敏度矩阵把步末损失梯度累加进总梯度。
-    math::Matrix<double, 8, parameters::kParameterCount> sensitivity =
-        math::Matrix<double, 8, parameters::kParameterCount>::zero();
+    math::Matrix<Real, 8, parameters::kParameterCount> sensitivity =
+        math::Matrix<Real, 8, parameters::kParameterCount>::zero();
     Gradient total = Gradient::zero();
     detail::StageJacobians stage[4];
     detail::ParameterJacobian stage_parameter[4];
@@ -54,7 +54,7 @@ double simulateAndSensitivity(const ModelParameters& model, const Terrain& terra
         total += transpose(sensitivity) *
                  simulation::step_loss_gradient(loss, num_steps, k, step_end_state);
     };
-    const double loss_value = detail::simulate_trajectory(
+    const Real loss_value = detail::simulate_trajectory(
         model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace, false,
         stage_visitor, step_visitor);
     if (final_state != nullptr) {

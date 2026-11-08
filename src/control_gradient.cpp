@@ -23,7 +23,7 @@ void Workspace::release() {
     input_jacobian.clear();
 }
 
-double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
+Real simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
                            const simulation::State& initial, const BaseState* base,
                            const math::Vector4d* torque, std::size_t num_steps,
                            const simulation::TrajectorySpec& spec,
@@ -32,8 +32,8 @@ double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
     simulation::validate(spec, num_steps);
     workspace.resize(num_steps, spec.refinement);
     const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
-    const double h = spec.step / static_cast<double>(spec.refinement);
-    const detail::ScalarModelParameters<double> scalar_model = detail::convert_model<double>(model);
+    const Real h = spec.step / static_cast<Real>(spec.refinement);
+    const detail::ScalarModelParameters<Real> scalar_model = detail::convert_model<Real>(model);
 
     // 单遍完成前向仿真与阶段 Jacobian：每个子步结束时把 W 与 Ψ 写入工作区
     detail::StageJacobians stage[4];
@@ -47,7 +47,7 @@ double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
         }
     };
     const auto step_visitor = [](std::size_t, const simulation::State&) {};
-    const double loss_value = detail::simulate_trajectory(
+    const Real loss_value = detail::simulate_trajectory(
         model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace, false,
         stage_visitor, step_visitor);
     if (final_state != nullptr) {
@@ -59,7 +59,7 @@ double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
 
     // 反向伴随：协态按子步逆序传播，输入梯度在同一主步内累加
     math::Vector8d adjoint = math::Vector8d::zero();
-    const double torque_scale = 1.0 / static_cast<double>(num_steps);
+    const Real torque_scale = 1.0 / static_cast<Real>(num_steps);
     for (std::size_t k = num_steps; k-- > 0;) {
         adjoint += simulation::step_loss_gradient(loss, num_steps, k, workspace.trace.step_end[k]);
         math::Vector4d accumulated = math::Vector4d::zero();

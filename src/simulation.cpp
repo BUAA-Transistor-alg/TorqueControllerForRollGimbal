@@ -40,23 +40,23 @@ void validate(const TrajectorySpec& spec, std::size_t num_steps) {
 math::Vector8d state_derivative(const ModelParameters& model, const Terrain& terrain,
                                 const BaseState& base, const State& state,
                                 const math::Vector4d& torque) {
-    const detail::ScalarModelParameters<double> scalar_model = detail::convert_model<double>(model);
-    const detail::ScalarTerrain<double> scalar_terrain = detail::convert_terrain<double>(terrain);
-    return detail::evaluate_derivative<double>(scalar_model, scalar_terrain, base,
+    const detail::ScalarModelParameters<Real> scalar_model = detail::convert_model<Real>(model);
+    const detail::ScalarTerrain<Real> scalar_terrain = detail::convert_terrain<Real>(terrain);
+    return detail::evaluate_derivative<Real>(scalar_model, scalar_terrain, base,
                                                detail::pack_state(state), torque);
 }
 
-double step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
+Real step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
                  const State& state, const math::Vector4d& torque) {
-    const double scale = 1.0 / (2.0 * static_cast<double>(num_steps));
-    double total = 0.0;
+    const Real scale = 1.0 / (2.0 * static_cast<Real>(num_steps));
+    Real total = 0.0;
     for (int i = 0; i < 4; ++i) {
-        const double angle_target =
+        const Real angle_target =
             (loss.target_angle != nullptr) ? loss.target_angle[step][i] : 0.0;
-        const double velocity_target =
+        const Real velocity_target =
             (loss.target_velocity != nullptr) ? loss.target_velocity[step][i] : 0.0;
-        const double angle_error = state.angle[i] - angle_target;
-        const double velocity_error = state.velocity[i] - velocity_target;
+        const Real angle_error = state.angle[i] - angle_target;
+        const Real velocity_error = state.velocity[i] - velocity_target;
         total += loss.angle_weights[i] * angle_error * angle_error +
                  loss.velocity_weights[i] * velocity_error * velocity_error +
                  loss.torque_weights[i] * torque[i] * torque[i];
@@ -66,12 +66,12 @@ double step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
 
 math::Vector8d step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
                                   std::size_t step, const State& state) {
-    const double scale = 1.0 / static_cast<double>(num_steps);
+    const Real scale = 1.0 / static_cast<Real>(num_steps);
     math::Vector8d gradient;
     for (int i = 0; i < 4; ++i) {
-        const double angle_target =
+        const Real angle_target =
             (loss.target_angle != nullptr) ? loss.target_angle[step][i] : 0.0;
-        const double velocity_target =
+        const Real velocity_target =
             (loss.target_velocity != nullptr) ? loss.target_velocity[step][i] : 0.0;
         gradient[i] = scale * loss.angle_weights[i] * (state.angle[i] - angle_target);
         gradient[4 + i] =
@@ -80,7 +80,7 @@ math::Vector8d step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
     return gradient;
 }
 
-double simulate(const ModelParameters& model, const Terrain& terrain, const State& initial,
+Real simulate(const ModelParameters& model, const Terrain& terrain, const State& initial,
                 const BaseState* base, const math::Vector4d* torque, std::size_t num_steps,
                 const TrajectorySpec& spec, const LossSpec& loss, Trace& trace) {
     return detail::simulate_trajectory(

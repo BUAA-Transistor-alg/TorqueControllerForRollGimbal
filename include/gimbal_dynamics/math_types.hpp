@@ -1,14 +1,25 @@
 #pragma once
 
 // 固定尺寸向量/矩阵与基础运算。
-// 行主序存储，模板标量为 double。
+// 行主序存储，模板标量为 Real。
 
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
+#include <type_traits>
 
 namespace gimbal {
+
+// 计算精度：默认 double；定义 GIMBAL_REAL_FLOAT 时切换为 float，用于精度对照测量
+#ifdef GIMBAL_REAL_FLOAT
+using Real = float;
+#else
+using Real = double;
+#endif
+
 namespace math {
+
+using Real = gimbal::Real;
 
 template <typename Scalar, int N>
 struct Vector {
@@ -117,14 +128,14 @@ using Matrix84 = Matrix<Scalar, 8, 4>;
 template <typename Scalar>
 using Matrix856 = Matrix<Scalar, 8, 56>;
 
-using Vector3d = Vector3<double>;
-using Matrix3d = Matrix3<double>;
-using Vector4d = Vector4<double>;
-using Matrix4d = Matrix4<double>;
-using Matrix34d = Matrix34<double>;
-using Vector8d = Vector8<double>;
-using Matrix8d = Matrix8<double>;
-using Matrix84d = Matrix84<double>;
+using Vector3d = Vector3<Real>;
+using Matrix3d = Matrix3<Real>;
+using Vector4d = Vector4<Real>;
+using Matrix4d = Matrix4<Real>;
+using Matrix34d = Matrix34<Real>;
+using Vector8d = Vector8<Real>;
+using Matrix8d = Matrix8<Real>;
+using Matrix84d = Matrix84<Real>;
 
 // ---- 向量运算 ----
 template <typename Scalar, int N>
@@ -154,25 +165,29 @@ Vector<Scalar, N> operator-(const Vector<Scalar, N>& value) {
     return result;
 }
 
-template <typename Scalar, int N>
-Vector<Scalar, N> operator*(const Vector<Scalar, N>& value, const Scalar& factor) {
+template <typename Scalar, int N, typename Factor>
+Vector<Scalar, N> operator*(const Vector<Scalar, N>& value, const Factor& factor) {
+    static_assert(std::is_arithmetic<Factor>::value, "标量因子必须是算术类型");
+    const Scalar scale = Scalar(factor);
     Vector<Scalar, N> result;
     for (int i = 0; i < N; ++i) {
-        result.data[i] = value.data[i] * factor;
+        result.data[i] = value.data[i] * scale;
     }
     return result;
 }
 
-template <typename Scalar, int N>
-Vector<Scalar, N> operator*(const Scalar& factor, const Vector<Scalar, N>& value) {
+template <typename Scalar, int N, typename Factor>
+Vector<Scalar, N> operator*(const Factor& factor, const Vector<Scalar, N>& value) {
     return value * factor;
 }
 
-template <typename Scalar, int N>
-Vector<Scalar, N> operator/(const Vector<Scalar, N>& value, const Scalar& divisor) {
+template <typename Scalar, int N, typename Factor>
+Vector<Scalar, N> operator/(const Vector<Scalar, N>& value, const Factor& divisor) {
+    static_assert(std::is_arithmetic<Factor>::value, "标量因子必须是算术类型");
+    const Scalar scale = Scalar(divisor);
     Vector<Scalar, N> result;
     for (int i = 0; i < N; ++i) {
-        result.data[i] = value.data[i] / divisor;
+        result.data[i] = value.data[i] / scale;
     }
     return result;
 }
@@ -267,19 +282,21 @@ Matrix<Scalar, R, C> operator-(const Matrix<Scalar, R, C>& lhs, const Matrix<Sca
     return result;
 }
 
-template <typename Scalar, int R, int C>
-Matrix<Scalar, R, C> operator*(const Matrix<Scalar, R, C>& value, const Scalar& factor) {
+template <typename Scalar, int R, int C, typename Factor>
+Matrix<Scalar, R, C> operator*(const Matrix<Scalar, R, C>& value, const Factor& factor) {
+    static_assert(std::is_arithmetic<Factor>::value, "标量因子必须是算术类型");
+    const Scalar scale = Scalar(factor);
     Matrix<Scalar, R, C> result;
     for (int r = 0; r < R; ++r) {
         for (int c = 0; c < C; ++c) {
-            result.data[r][c] = value.data[r][c] * factor;
+            result.data[r][c] = value.data[r][c] * scale;
         }
     }
     return result;
 }
 
-template <typename Scalar, int R, int C>
-Matrix<Scalar, R, C> operator*(const Scalar& factor, const Matrix<Scalar, R, C>& value) {
+template <typename Scalar, int R, int C, typename Factor>
+Matrix<Scalar, R, C> operator*(const Factor& factor, const Matrix<Scalar, R, C>& value) {
     return value * factor;
 }
 
@@ -353,14 +370,14 @@ Vector<Scalar, C> operator*(const Vector<Scalar, R>& lhs, const Matrix<Scalar, R
 
 // 4x4 对称正定矩阵的 Cholesky 分解，分解一次可反复求解
 struct Cholesky4 {
-    double lower[4][4];
+    Real lower[4][4];
     bool valid = false;
 
-    void factorize(const Matrix4<double>& mass) {
+    void factorize(const Matrix4<Real>& mass) {
         valid = true;
         for (int i = 0; i < 4; ++i) {
             for (int j = 0; j <= i; ++j) {
-                double sum = mass.data[i][j];
+                Real sum = mass.data[i][j];
                 for (int k = 0; k < j; ++k) {
                     sum -= lower[i][k] * lower[j][k];
                 }
@@ -377,18 +394,18 @@ struct Cholesky4 {
         }
     }
 
-    Vector4<double> solve(const Vector4<double>& rhs) const {
-        double intermediate[4];
+    Vector4<Real> solve(const Vector4<Real>& rhs) const {
+        Real intermediate[4];
         for (int i = 0; i < 4; ++i) {
-            double sum = rhs.data[i];
+            Real sum = rhs.data[i];
             for (int k = 0; k < i; ++k) {
                 sum -= lower[i][k] * intermediate[k];
             }
             intermediate[i] = sum / lower[i][i];
         }
-        Vector4<double> result;
+        Vector4<Real> result;
         for (int i = 3; i >= 0; --i) {
-            double sum = intermediate[i];
+            Real sum = intermediate[i];
             for (int k = i + 1; k < 4; ++k) {
                 sum -= lower[k][i] * result.data[k];
             }
@@ -399,7 +416,7 @@ struct Cholesky4 {
 };
 
 // 4x4 对称正定求解（Cholesky 分解）
-inline Vector4<double> solve4(const Matrix4<double>& mass, const Vector4<double>& rhs) {
+inline Vector4<Real> solve4(const Matrix4<Real>& mass, const Vector4<Real>& rhs) {
     Cholesky4 factor;
     factor.factorize(mass);
     if (!factor.valid) {

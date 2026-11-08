@@ -26,21 +26,21 @@ struct StageJacobians {
 };
 
 StageJacobians evaluate_stage_jacobians(const StageData& stage,
-                                        const ScalarModelParameters<double>& model);
+                                        const ScalarModelParameters<Real>& model);
 
 // 单阶段的参数 Jacobian ∂f/∂p（8×56），同时给出状态 Jacobian
-using ParameterJacobian = math::Matrix<double, 8, parameters::kParameterCount>;
+using ParameterJacobian = math::Matrix<Real, 8, parameters::kParameterCount>;
 ParameterJacobian evaluate_parameter_jacobian(const StageData& stage,
-                                              const ScalarModelParameters<double>& model,
+                                              const ScalarModelParameters<Real>& model,
                                               math::Matrix8d& state_jacobian);
 
 // 整子步传播子 W = ∂y'/∂y 与输入 Jacobian Ψ = ∂y'/∂u（u 在四个阶段中相同）
-void assemble_substep(const StageJacobians stage[4], double h, math::Matrix8d& propagation,
+void assemble_substep(const StageJacobians stage[4], Real h, math::Matrix8d& propagation,
                       math::Matrix84d& input_jacobian);
 
 // 整子步参数 Jacobian P = ∂y'/∂p，同时给出 W
 void assemble_parameter_substep(const StageJacobians stage[4],
-                                const ParameterJacobian stage_parameter[4], double h,
+                                const ParameterJacobian stage_parameter[4], Real h,
                                 math::Matrix8d& propagation,
                                 ParameterJacobian& parameter_jacobian);
 

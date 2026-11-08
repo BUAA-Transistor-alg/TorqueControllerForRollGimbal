@@ -38,7 +38,7 @@ struct Workspace {
 //   gradient     长度 num_steps，第 k 个元素为 dL/dτ_k；可为 nullptr（只做前向）
 //   final_state  最后一个主步结束后的状态；可为 nullptr
 // base 与 torque 的长度均为 num_steps。
-double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
+Real simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
                            const simulation::State& initial, const BaseState* base,
                            const math::Vector4d* torque, std::size_t num_steps,
                            const simulation::TrajectorySpec& spec,

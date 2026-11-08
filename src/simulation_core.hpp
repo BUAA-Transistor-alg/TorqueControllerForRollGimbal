@@ -22,7 +22,7 @@ namespace gimbal {
 namespace detail {
 
 // 主步内底盘量按等角加速度外推，线加速度保持不变
-inline BaseState advance_base(const BaseState& base, double time) {
+inline BaseState advance_base(const BaseState& base, Real time) {
     BaseState result = base;
     result.yaw = base.yaw + base.yaw_rate * time + 0.5 * base.yaw_acceleration * time * time;
     result.yaw_rate = base.yaw_rate + base.yaw_acceleration * time;
@@ -50,7 +50,7 @@ inline simulation::State unpack_state(const math::Vector8d& state) {
 // 阶段回调签名：void(std::size_t stage_index, const StageData& data)
 // 主步回调签名：void(std::size_t step_index, const simulation::State& step_end_state)
 template <typename StageVisitor, typename StepVisitor>
-double simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
+Real simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
                            const simulation::State& initial, const BaseState* base,
                            const math::Vector4d* torque, std::size_t num_steps,
                            const simulation::TrajectorySpec& spec,
@@ -65,19 +65,19 @@ double simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
         throw std::invalid_argument("torque 不能为空");
     }
     trace.resize(num_steps, spec.refinement);
-    const ScalarModelParameters<double> scalar_model = convert_model<double>(model);
-    const ScalarTerrain<double> scalar_terrain = convert_terrain<double>(terrain);
-    const TerrainFrame<double> terrain_frame = evaluate_terrain_frame(scalar_terrain);
+    const ScalarModelParameters<Real> scalar_model = convert_model<Real>(model);
+    const ScalarTerrain<Real> scalar_terrain = convert_terrain<Real>(terrain);
+    const TerrainFrame<Real> terrain_frame = evaluate_terrain_frame(scalar_terrain);
     const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
-    const double h = spec.step / static_cast<double>(spec.refinement);
+    const Real h = spec.step / static_cast<Real>(spec.refinement);
     math::Vector8d state = pack_state(initial);
-    double total_loss = 0.0;
+    Real total_loss = 0.0;
     StageData data;
 
     for (std::size_t k = 0; k < num_steps; ++k) {
         const math::Vector4d torque_k = torque[k];
         for (std::size_t s = 0; s < refinement; ++s) {
-            const double substep_time = static_cast<double>(s) * h;
+            const Real substep_time = static_cast<Real>(s) * h;
             const BaseState stage_input[4] = {
                 advance_base(base[k], substep_time),
                 advance_base(base[k], substep_time + 0.5 * h),
@@ -89,7 +89,7 @@ double simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
             stage_state[0] = state;
             for (int t = 0; t < 4; ++t) {
                 if (t > 0) {
-                    const double advance = (t == 3) ? h : 0.5 * h;
+                    const Real advance = (t == 3) ? h : 0.5 * h;
                     stage_state[t] = stage_state[0] + stage_derivative[t - 1] * advance;
                 }
                 evaluate_stage_data(scalar_model, terrain_frame, stage_input[t],

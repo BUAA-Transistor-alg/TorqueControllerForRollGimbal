@@ -18,6 +18,12 @@ add_library(gimbal_dynamics STATIC
 target_include_directories(gimbal_dynamics PUBLIC include PRIVATE src)
 target_compile_options(gimbal_dynamics PRIVATE -Wall -Wextra)
 
+# 精度开关：默认 double；打开后内部计算改用 float，仅用于精度对照测量
+option(GIMBAL_REAL_FLOAT "内部计算精度切换为 float（仅用于精度对照测量）" OFF)
+if(GIMBAL_REAL_FLOAT)
+    target_compile_definitions(gimbal_dynamics PUBLIC GIMBAL_REAL_FLOAT)
+endif()
+
 # 热路径的向量化与展开选项：-mavx2 只影响本库的编译单元；
 # -ffp-contract=off 保证不引入 FMA，浮点运算顺序与结果保持不变。
 include(CheckCXXCompilerFlag)

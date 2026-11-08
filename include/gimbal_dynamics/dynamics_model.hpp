@@ -8,7 +8,7 @@ namespace gimbal {
 
 // 单个刚体 B1..B4 的惯性参数
 struct BodyParameters {
-    double mass = 0.0;
+    Real mass = 0.0;
     math::Vector3d com = math::Vector3d::zero();      // 质心相对刚体坐标系原点
     math::Matrix3d inertia = math::Matrix3d::zero();  // 绕质心，在刚体轴上
 };
@@ -21,7 +21,7 @@ struct ModelParameters {
                                                    math::Vector3d::zero(),
                                                    math::Vector3d::zero()};  // o_1..o_4
     math::Vector4d damping = math::Vector4d::zero();  // d_1..d_4
-    double gravity = 9.81;
+    Real gravity = 9.81;
 
     // 示例参数，实际使用时替换为实测值
     static ModelParameters demo();
@@ -29,16 +29,16 @@ struct ModelParameters {
 
 // 地面坡角 λ 与坡向 γ
 struct Terrain {
-    double slope_angle = 0.0;
-    double slope_direction = 0.0;
+    Real slope_angle = 0.0;
+    Real slope_direction = 0.0;
 };
 
 // 底盘运动输入。底盘位置与线速度不进入关节动力学。
 struct BaseState {
     math::Vector3d acceleration = math::Vector3d::zero();  // 参考点线加速度 a0
-    double yaw = 0.0;                                      // ψ
-    double yaw_rate = 0.0;                                 // ψ̇
-    double yaw_acceleration = 0.0;                         // ψ̈
+    Real yaw = 0.0;                                      // ψ
+    Real yaw_rate = 0.0;                                 // ψ̇
+    Real yaw_acceleration = 0.0;                         // ψ̈
 };
 
 // 正向动力学：M(q) q̈ + D q̇ + b = τ，返回 q̈

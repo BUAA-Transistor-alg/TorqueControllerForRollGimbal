@@ -19,9 +19,9 @@ struct StageData {
     math::Vector4d angle;
     math::Vector4d qdot;
     math::Vector4d torque;
-    Chain<double> chain;
-    MassInternals<double> mass_internals;
-    BiasInternals<double> bias_internals;
+    Chain<Real> chain;
+    MassInternals<Real> mass_internals;
+    BiasInternals<Real> bias_internals;
     math::Matrix4d mass;
     math::Cholesky4 factor;
     math::Vector4d bias;
@@ -30,8 +30,8 @@ struct StageData {
 };
 
 // 由阶段状态与力矩求值全部正演中间量（就地写入，避免大对象拷贝）
-void evaluate_stage_data(const ScalarModelParameters<double>& model,
-                         const TerrainFrame<double>& frame, const BaseState& base,
+void evaluate_stage_data(const ScalarModelParameters<Real>& model,
+                         const TerrainFrame<Real>& frame, const BaseState& base,
                          const simulation::State& state, const math::Vector4d& torque,
                          StageData& out);
 

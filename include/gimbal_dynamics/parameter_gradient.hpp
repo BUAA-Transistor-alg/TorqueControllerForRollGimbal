@@ -22,7 +22,7 @@
 namespace gimbal {
 namespace parameter_gradient {
 
-using Gradient = math::Vector<double, parameters::kParameterCount>;
+using Gradient = math::Vector<Real, parameters::kParameterCount>;
 
 // 调用方分配一次、可跨多次调用复用的缓冲
 struct Workspace {
@@ -36,7 +36,7 @@ struct Workspace {
 //   gradient     输出，56 维 dL/dp；可为 nullptr（只做前向）
 //   final_state  最后一个主步结束后的状态；可为 nullptr
 // base 与 torque 的长度均为 num_steps。
-double simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain,
+Real simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain,
                               const simulation::State& initial, const BaseState* base,
                               const math::Vector4d* torque, std::size_t num_steps,
                               const simulation::TrajectorySpec& spec,

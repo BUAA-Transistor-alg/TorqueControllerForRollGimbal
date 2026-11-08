@@ -5,8 +5,8 @@
 namespace gimbal {
 namespace detail {
 
-void evaluate_stage_data(const ScalarModelParameters<double>& model,
-                         const TerrainFrame<double>& frame, const BaseState& base,
+void evaluate_stage_data(const ScalarModelParameters<Real>& model,
+                         const TerrainFrame<Real>& frame, const BaseState& base,
                          const simulation::State& state, const math::Vector4d& torque,
                          StageData& out) {
     out.base = base;

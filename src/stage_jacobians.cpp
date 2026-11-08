@@ -7,17 +7,17 @@ namespace {
 // 阶段 Jacobian 的块结构：Jx = [[0, I], [Jq, Jv]]。
 // 直接按块计算 Jx * M，避免 4×4 零块与单位块的乘加。
 template <int Columns>
-math::Matrix<double, 8, Columns> multiply_jacobian(
-    const math::Matrix8d& jacobian, const math::Matrix<double, 8, Columns>& matrix) {
-    math::Matrix<double, 8, Columns> result;
+math::Matrix<Real, 8, Columns> multiply_jacobian(
+    const math::Matrix8d& jacobian, const math::Matrix<Real, 8, Columns>& matrix) {
+    math::Matrix<Real, 8, Columns> result;
     for (int column = 0; column < Columns; ++column) {
         for (int row = 0; row < 4; ++row) {
             result.data[row][column] = matrix.data[row + 4][column];
-            double upper = 0.0;
+            Real upper = 0.0;
             for (int k = 0; k < 4; ++k) {
                 upper += jacobian.data[4 + row][k] * matrix.data[k][column];
             }
-            double lower = 0.0;
+            Real lower = 0.0;
             for (int k = 0; k < 4; ++k) {
                 lower += jacobian.data[4 + row][4 + k] * matrix.data[4 + k][column];
             }
@@ -29,7 +29,7 @@ math::Matrix<double, 8, Columns> multiply_jacobian(
 
 // W = I + h/6 (J1 + 2 J2 A2 + 2 J3 A3 + J4 A4)
 // A2 = I + h/2 J1，A3 = I + h/2 J2 A2，A4 = I + h J3 A3
-math::Matrix8d propagation_matrix(const StageJacobians stage[4], double h) {
+math::Matrix8d propagation_matrix(const StageJacobians stage[4], Real h) {
     const math::Matrix8d identity = math::Matrix8d::identity();
     const math::Matrix8d a2 = identity + stage[0].state * (0.5 * h);
     const math::Matrix8d a3 = identity + multiply_jacobian(stage[1].state, a2) * (0.5 * h);
@@ -42,7 +42,7 @@ math::Matrix8d propagation_matrix(const StageJacobians stage[4], double h) {
 
 }  // namespace
 
-void assemble_substep(const StageJacobians stage[4], double h, math::Matrix8d& propagation,
+void assemble_substep(const StageJacobians stage[4], Real h, math::Matrix8d& propagation,
                       math::Matrix84d& input_jacobian) {
     propagation = propagation_matrix(stage, h);
     const math::Matrix84d basis1 = stage[0].input;
@@ -56,7 +56,7 @@ void assemble_substep(const StageJacobians stage[4], double h, math::Matrix8d& p
 }
 
 void assemble_parameter_substep(const StageJacobians stage[4],
-                                const ParameterJacobian stage_parameter[4], double h,
+                                const ParameterJacobian stage_parameter[4], Real h,
                                 math::Matrix8d& propagation,
                                 ParameterJacobian& parameter_jacobian) {
     propagation = propagation_matrix(stage, h);

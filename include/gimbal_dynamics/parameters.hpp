@@ -10,7 +10,7 @@
 // 惯量按对称张量处理：每刚体的第 5..10 个分量依次对应 xx、yy、zz、xy、xz、yz，
 // 加减该分量时同时作用到 (r,c) 与 (c,r)。
 //
-// parameter_value 与 add_parameter 同时适用于 ModelParameters（double）与内部的
+// parameter_value 与 add_parameter 同时适用于 ModelParameters（Real）与内部的
 // 标量泛化模型，参数布局只在本文件维护一份。
 
 #include <stdexcept>
@@ -29,7 +29,7 @@ inline constexpr int kDampingParameterCount = 4;
 inline constexpr int kParameterCount =
     kBodyCount * kBodyParameterCount + kOffsetParameterCount + kDampingParameterCount;
 
-// 模型标量类型：ModelParameters 为 double，标量泛化模型为对应的 Scalar。
+// 模型标量类型：ModelParameters 为 Real，标量泛化模型为对应的 Scalar。
 template <typename Model>
 using ModelScalar = std::remove_reference_t<decltype(std::declval<Model&>().gravity)>;
 
@@ -113,11 +113,11 @@ void add_parameter(Model& model, int index, const ModelScalar<Model>& delta) {
 }
 
 // ModelParameters 上的便捷接口
-inline double value(const ModelParameters& model, int index) {
+inline Real value(const ModelParameters& model, int index) {
     return parameter_value(model, index);
 }
 
-inline void set_value(ModelParameters& model, int index, double new_value) {
+inline void set_value(ModelParameters& model, int index, Real new_value) {
     add_parameter(model, index, new_value - parameter_value(model, index));
 }
 

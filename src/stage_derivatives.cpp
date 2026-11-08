@@ -59,7 +59,7 @@ ArrayMatrix zero_matrices() {
 
 // out = a × v（a 为方向批次，v 为固定向量）
 template <int N>
-void cross_batch_vector(const double a[3][N], const Vector3d& v, double out[3][N]) {
+void cross_batch_vector(const Real a[3][N], const Vector3d& v, Real out[3][N]) {
     for (int d = 0; d < N; ++d) {
         out[0][d] = a[1][d] * v[2] - a[2][d] * v[1];
         out[1][d] = a[2][d] * v[0] - a[0][d] * v[2];
@@ -69,7 +69,7 @@ void cross_batch_vector(const double a[3][N], const Vector3d& v, double out[3][N
 
 // out = v × a（a 为方向批次，v 为固定向量）
 template <int N>
-void cross_vector_batch(const Vector3d& v, const double a[3][N], double out[3][N]) {
+void cross_vector_batch(const Vector3d& v, const Real a[3][N], Real out[3][N]) {
     for (int d = 0; d < N; ++d) {
         out[0][d] = v[1] * a[2][d] - v[2] * a[1][d];
         out[1][d] = v[2] * a[0][d] - v[0] * a[2][d];
@@ -79,7 +79,7 @@ void cross_vector_batch(const Vector3d& v, const double a[3][N], double out[3][N
 
 // out += a
 template <int N>
-void add_batch(double out[3][N], const double a[3][N]) {
+void add_batch(Real out[3][N], const Real a[3][N]) {
     for (int c = 0; c < 3; ++c) {
         for (int d = 0; d < N; ++d) {
             out[c][d] += a[c][d];
@@ -89,8 +89,8 @@ void add_batch(double out[3][N], const double a[3][N]) {
 
 // out = a + b + c（三项求和，减少临时量写法）
 template <int N>
-void sum3_batch(const double a[3][N], const double b[3][N], const double c[3][N],
-                double out[3][N]) {
+void sum3_batch(const Real a[3][N], const Real b[3][N], const Real c[3][N],
+                Real out[3][N]) {
     for (int component = 0; component < 3; ++component) {
         for (int d = 0; d < N; ++d) {
             out[component][d] = a[component][d] + b[component][d] + c[component][d];
@@ -100,7 +100,7 @@ void sum3_batch(const double a[3][N], const double b[3][N], const double c[3][N]
 
 // out = v * row（外积）
 template <int N>
-void outer_batch(const Vector3d& v, const double row[N], double out[3][N]) {
+void outer_batch(const Vector3d& v, const Real row[N], Real out[3][N]) {
     for (int component = 0; component < 3; ++component) {
         for (int d = 0; d < N; ++d) {
             out[component][d] = v[component] * row[d];
@@ -110,7 +110,7 @@ void outer_batch(const Vector3d& v, const double row[N], double out[3][N]) {
 
 // out = s * a
 template <int N>
-void scale_batch(const double a[3][N], double scale, double out[3][N]) {
+void scale_batch(const Real a[3][N], Real scale, Real out[3][N]) {
     for (int component = 0; component < 3; ++component) {
         for (int d = 0; d < N; ++d) {
             out[component][d] = scale * a[component][d];
@@ -121,22 +121,24 @@ void scale_batch(const double a[3][N], double scale, double out[3][N]) {
 // 方向种子批次
 template <int N>
 struct SeedBatch {
-    double axis[4][3][N];
-    double offset[4][3][N];
-    double origin[4][3][N];
-    double com[4][3][N];
-    double com_relative[4][3][N];
-    double velocity[4][N];
-    double inertia_alpha[4][3][N];
-    double inertia_omega[4][3][N];
-    double inertia_world[4][4][3][3];  // [body][q 方向][3][3]
+    Real axis[4][3][N];
+    Real offset[4][3][N];
+    Real origin[4][3][N];
+    Real com[4][3][N];
+    Real com_relative[4][3][N];
+    Real velocity[4][N];
+    Real inertia_alpha[4][3][N];
+    Real inertia_omega[4][3][N];
+    Real inertia_world[4][4][3][3];  // [body][q 方向][3][3]
 };
 
+// 广义坐标方向（列 0..3）与惯量矩阵方向导数由构造过程完整写入，
+// 这里只需要清零其余方向列。
 template <int N>
 void zero_seed_batch(SeedBatch<N>& seed) {
     for (int body = 0; body < 4; ++body) {
         for (int component = 0; component < 3; ++component) {
-            for (int d = 0; d < N; ++d) {
+            for (int d = 4; d < N; ++d) {
                 seed.axis[body][component][d] = 0.0;
                 seed.offset[body][component][d] = 0.0;
                 seed.origin[body][component][d] = 0.0;
@@ -149,22 +151,15 @@ void zero_seed_batch(SeedBatch<N>& seed) {
         for (int d = 0; d < N; ++d) {
             seed.velocity[body][d] = 0.0;
         }
-        for (int k = 0; k < 4; ++k) {
-            for (int row = 0; row < 3; ++row) {
-                for (int column = 0; column < 3; ++column) {
-                    seed.inertia_world[body][k][row][column] = 0.0;
-                }
-            }
-        }
     }
 }
 
 // 构造方向种子批次
 template <int N>
 SeedBatch<N> build_seed_batch(const StageData& stage,
-                              const ScalarModelParameters<double>& model) {
-    const Chain<double>& chain = stage.chain;
-    const BiasInternals<double>& internals = stage.bias_internals;
+                              const ScalarModelParameters<Real>& model) {
+    const Chain<Real>& chain = stage.chain;
+    const BiasInternals<Real>& internals = stage.bias_internals;
     SeedBatch<N> seed;
     zero_seed_batch(seed);
     const Matrix3d base_rotation =
@@ -172,7 +167,7 @@ SeedBatch<N> build_seed_batch(const StageData& stage,
 
     // 广义坐标方向 0..3
     for (int k = 0; k < 4; ++k) {
-        const Matrix3d axis_skew = skew_matrix(axis_local<double>(k));
+        const Matrix3d axis_skew = skew_matrix(axis_local<Real>(k));
         const Matrix3d rotation_derivative =
             chain.rotation[k] * axis_skew * transpose(chain.rotation[k]);
         ArrayMatrix delta_rotation = zero_matrices();
@@ -193,7 +188,7 @@ SeedBatch<N> build_seed_batch(const StageData& stage,
         }
         Array3 delta_axis = zero_vectors();
         for (int j = 1; j < 4; ++j) {
-            delta_axis[j] = delta_rotation[j - 1] * axis_local<double>(j);
+            delta_axis[j] = delta_rotation[j - 1] * axis_local<Real>(j);
         }
         Array3 delta_com_relative = zero_vectors();
         Array3 delta_com = zero_vectors();
@@ -218,8 +213,8 @@ SeedBatch<N> build_seed_batch(const StageData& stage,
                 for (int column = 0; column < 3; ++column) {
                     seed.inertia_world[i][k][row][column] = delta_inertia_world(row, column);
                 }
-                double alpha = 0.0;
-                double omega = 0.0;
+                Real alpha = 0.0;
+                Real omega = 0.0;
                 for (int l = 0; l < 3; ++l) {
                     alpha += delta_inertia_world(row, l) * internals.alpha[i][l];
                     omega += delta_inertia_world(row, l) * internals.omega[i][l];
@@ -274,35 +269,35 @@ SeedBatch<N> build_seed_batch(const StageData& stage,
 // 各刚体角速度、角加速度、质心加速度的方向导数批次
 template <int N>
 struct KinematicsBatch {
-    double omega[4][3][N];
-    double alpha[4][3][N];
-    double com_acceleration[4][3][N];
+    Real omega[4][3][N];
+    Real alpha[4][3][N];
+    Real com_acceleration[4][3][N];
 };
 
 // 全量运动学方向导数：逐方向独立计算，按方向维展开为连续的浮点运算
 template <int N>
 KinematicsBatch<N> propagate_kinematics(const StageData& stage, const SeedBatch<N>& seed) {
-    const Chain<double>& chain = stage.chain;
-    const BiasInternals<double>& internals = stage.bias_internals;
+    const Chain<Real>& chain = stage.chain;
+    const BiasInternals<Real>& internals = stage.bias_internals;
     KinematicsBatch<N> result;
 
     Vector3d previous_omega = chain.normal * stage.base.yaw_rate;
     Vector3d previous_alpha = chain.normal * stage.base.yaw_acceleration;
     Vector3d previous_origin_acceleration = stage.base.acceleration;
-    double delta_previous_omega[3][N] = {};
-    double delta_previous_alpha[3][N] = {};
-    double delta_previous_origin_acceleration[3][N] = {};
-    double temp1[3][N];
-    double temp2[3][N];
-    double temp3[3][N];
+    Real delta_previous_omega[3][N] = {};
+    Real delta_previous_alpha[3][N] = {};
+    Real delta_previous_origin_acceleration[3][N] = {};
+    Real temp1[3][N];
+    Real temp2[3][N];
+    Real temp3[3][N];
 
     for (int i = 0; i < 4; ++i) {
         const Vector3d& offset = chain.offset[i];
         const Vector3d& axis = chain.axis[i];
-        const double velocity = stage.qdot[i];
+        const Real velocity = stage.qdot[i];
 
         // axis_direction = δa_i q̇_i + a_i δq̇_i
-        double axis_direction[3][N];
+        Real axis_direction[3][N];
         {
             const Vector3d axis_velocity = axis * velocity;
             for (int component = 0; component < 3; ++component) {
@@ -335,7 +330,7 @@ KinematicsBatch<N> propagate_kinematics(const StageData& stage, const SeedBatch<
         //        + δω_{i-1} × (ω × r) + ω × (δω_{i-1} × r) + ω × (ω × δr)
         cross_batch_vector(delta_previous_alpha, offset, temp1);
         cross_vector_batch(previous_alpha, seed.offset[i], temp2);
-        double delta_origin_acceleration[3][N];
+        Real delta_origin_acceleration[3][N];
         sum3_batch(delta_previous_origin_acceleration, temp1, temp2, delta_origin_acceleration);
         cross_batch_vector(delta_previous_omega, omega_cross_offset, temp1);
         cross_batch_vector(delta_previous_omega, offset, temp2);
@@ -379,19 +374,19 @@ KinematicsBatch<N> propagate_kinematics(const StageData& stage, const SeedBatch<
 
 // 偏置力方向导数的批处理：由运动学方向导数批次求各关节方向导数
 template <int N>
-void evaluate_bias_direction_batch(const ScalarModelParameters<double>& model, const StageData& stage,
+void evaluate_bias_direction_batch(const ScalarModelParameters<Real>& model, const StageData& stage,
                                    const SeedBatch<N>& seed, const KinematicsBatch<N>& kinematics,
-                                   double delta_bias[4][N]) {
-    const BiasInternals<double>& internals = stage.bias_internals;
-    double delta_force[4][3][N];
-    double delta_couple[4][3][N];
-    double temp1[3][N];
-    double temp2[3][N];
-    double temp3[3][N];
+                                   Real delta_bias[4][N]) {
+    const BiasInternals<Real>& internals = stage.bias_internals;
+    Real delta_force[4][3][N];
+    Real delta_couple[4][3][N];
+    Real temp1[3][N];
+    Real temp2[3][N];
+    Real temp3[3][N];
 
     for (int i = 0; i < 4; ++i) {
         const Matrix3d& inertia_world = stage.mass_internals.inertia_world[i];
-        const double body_mass = model.bodies[i].mass;
+        const Real body_mass = model.bodies[i].mass;
         for (int component = 0; component < 3; ++component) {
             for (int d = 0; d < N; ++d) {
                 delta_force[i][component][d] = body_mass * kinematics.com_acceleration[i][component][d];
@@ -400,12 +395,12 @@ void evaluate_bias_direction_batch(const ScalarModelParameters<double>& model, c
         // δN = δI_w α + I_w δα + δω × (I_w ω) + ω × (δI_w ω + I_w δω)
         const Vector3d inertia_world_omega = inertia_world * internals.omega[i];
         cross_batch_vector(kinematics.omega[i], inertia_world_omega, temp1);
-        double inertia_alpha[3][N];
-        double inertia_omega[3][N];
+        Real inertia_alpha[3][N];
+        Real inertia_omega[3][N];
         for (int component = 0; component < 3; ++component) {
             for (int d = 0; d < N; ++d) {
-                double alpha_value = 0.0;
-                double omega_value = 0.0;
+                Real alpha_value = 0.0;
+                Real omega_value = 0.0;
                 for (int l = 0; l < 3; ++l) {
                     alpha_value += inertia_world(component, l) * kinematics.alpha[i][l][d];
                     omega_value += inertia_world(component, l) * kinematics.omega[i][l][d];
@@ -429,14 +424,14 @@ void evaluate_bias_direction_batch(const ScalarModelParameters<double>& model, c
         }
     }
 
-    double child_force[3][N] = {};
-    double child_moment[3][N] = {};
+    Real child_force[3][N] = {};
+    Real child_moment[3][N] = {};
     for (int i = 3; i >= 0; --i) {
         const Vector3d com_relative = stage.chain.com[i] - stage.chain.joint_origin[i];
         // δm = δN + δc × F + c × δF
         cross_batch_vector(seed.com_relative[i], internals.force[i], temp1);
         cross_vector_batch(com_relative, delta_force[i], temp2);
-        double moment[3][N];
+        Real moment[3][N];
         for (int component = 0; component < 3; ++component) {
             for (int d = 0; d < N; ++d) {
                 moment[component][d] = delta_couple[i][component][d] + temp1[component][d] +
@@ -456,7 +451,7 @@ void evaluate_bias_direction_batch(const ScalarModelParameters<double>& model, c
         const Vector3d& axis = stage.chain.axis[i];
         const Vector3d& joint_moment = internals.joint_moment[i];
         for (int d = 0; d < N; ++d) {
-            double value = 0.0;
+            Real value = 0.0;
             for (int component = 0; component < 3; ++component) {
                 value += seed.axis[i][component][d] * joint_moment[component] +
                          axis[component] * moment[component][d];
@@ -474,7 +469,7 @@ void evaluate_bias_direction_batch(const ScalarModelParameters<double>& model, c
 
 // 从批次中取出第 direction 个方向的 3 维向量组
 template <int N>
-Array3 extract_vectors(const double field[4][3][N], int direction) {
+Array3 extract_vectors(const Real field[4][3][N], int direction) {
     Array3 result;
     for (int i = 0; i < 4; ++i) {
         result[i] = Vector3d::from(field[i][0][direction], field[i][1][direction],
@@ -484,12 +479,12 @@ Array3 extract_vectors(const double field[4][3][N], int direction) {
 }
 
 template <int N>
-Vector3d extract_vector(const double field[3][N], int direction) {
+Vector3d extract_vector(const Real field[3][N], int direction) {
     return Vector3d::from(field[0][direction], field[1][direction], field[2][direction]);
 }
 
 // 全量质量矩阵方向导数（q 方向）
-Matrix4d evaluate_mass_direction(const StageData& stage, const ScalarModelParameters<double>& model,
+Matrix4d evaluate_mass_direction(const StageData& stage, const ScalarModelParameters<Real>& model,
                                  const Array3& delta_axis, const Array3& delta_com,
                                  const Array3& delta_origin,
                                  const ArrayMatrix& delta_inertia_world) {
@@ -523,7 +518,7 @@ Matrix4d evaluate_mass_direction(const StageData& stage, const ScalarModelParame
 
 // 后缀加权的速度雅可比和：suffix[joint] = Σ_{i ≥ joint} m_i Jv_i
 std::array<Matrix34d, 4> evaluate_weighted_jacobian_sums(const StageData& stage,
-                                                        const ScalarModelParameters<double>& model) {
+                                                        const ScalarModelParameters<Real>& model) {
     std::array<Matrix34d, 4> suffix;
     for (int joint = 0; joint < 4; ++joint) {
         suffix[joint] = Matrix34d::zero();
@@ -539,10 +534,10 @@ std::array<Matrix34d, 4> evaluate_weighted_jacobian_sums(const StageData& stage,
 
 // 刚体质心参数方向的质量矩阵方向导数：只有该刚体的雅可比列变化
 Matrix4d evaluate_mass_direction_com(const StageData& stage,
-                                     const ScalarModelParameters<double>& model, int body,
+                                     const ScalarModelParameters<Real>& model, int body,
                                      const Vector3d& delta_com_relative) {
     const Matrix34d& velocity_jacobian = stage.mass_internals.velocity_jacobian[body];
-    const double body_mass = model.bodies[body].mass;
+    const Real body_mass = model.bodies[body].mass;
     Vector3d axis_cross[4];
     for (int joint = 0; joint <= body; ++joint) {
         axis_cross[joint] = cross_product(stage.chain.axis[joint], delta_com_relative);
@@ -550,7 +545,7 @@ Matrix4d evaluate_mass_direction_com(const StageData& stage,
     Matrix4d mass_derivative = Matrix4d::zero();
     for (int row = 0; row <= body; ++row) {
         for (int column = 0; column <= body; ++column) {
-            double value = 0.0;
+            Real value = 0.0;
             for (int component = 0; component < 3; ++component) {
                 value += axis_cross[row][component] * velocity_jacobian(component, column) +
                          velocity_jacobian(component, row) * axis_cross[column][component];
@@ -573,7 +568,7 @@ Matrix4d evaluate_mass_direction_offset(const StageData& stage, int joint,
     Matrix4d mass_derivative = Matrix4d::zero();
     for (int row = 0; row < 4; ++row) {
         for (int column = 0; column < 4; ++column) {
-            double value = 0.0;
+            Real value = 0.0;
             if (row < joint) {
                 for (int component = 0; component < 3; ++component) {
                     value += axis_cross[row][component] * weighted(component, column);
@@ -595,9 +590,9 @@ Matrix4d evaluate_mass_direction_offset(const StageData& stage, int joint,
 constexpr int kParameterBatchCount = 28;
 
 void evaluate_parameter_directions(const StageData& stage,
-                                   const ScalarModelParameters<double>& model,
-                                   double mass_derivative[kParameterBatchCount][16],
-                                   double bias_derivative[kParameterBatchCount][4]) {
+                                   const ScalarModelParameters<Real>& model,
+                                   Real mass_derivative[kParameterBatchCount][16],
+                                   Real bias_derivative[kParameterBatchCount][4]) {
     static constexpr int kRow[6] = {0, 1, 2, 0, 0, 1};
     static constexpr int kColumn[6] = {0, 1, 2, 1, 2, 2};
 
@@ -606,7 +601,7 @@ void evaluate_parameter_directions(const StageData& stage,
         const Matrix34d& velocity_jacobian = stage.mass_internals.velocity_jacobian[body];
         for (int row = 0; row < 4; ++row) {
             for (int column = 0; column < 4; ++column) {
-                double sum = 0.0;
+                Real sum = 0.0;
                 for (int component = 0; component < 3; ++component) {
                     sum += velocity_jacobian(component, row) *
                            velocity_jacobian(component, column);
@@ -626,7 +621,7 @@ void evaluate_parameter_directions(const StageData& stage,
             const int column_index = kColumn[entry];
             for (int row = 0; row < 4; ++row) {
                 for (int column = 0; column < 4; ++column) {
-                    double sum = local_jacobian(row_index, row) *
+                    Real sum = local_jacobian(row_index, row) *
                                  local_jacobian(column_index, column);
                     if (row_index != column_index) {
                         sum += local_jacobian(column_index, row) *
@@ -639,8 +634,8 @@ void evaluate_parameter_directions(const StageData& stage,
     }
 
     // 偏置力：质量参数给力，惯量参数给力偶
-    double delta_force[4][3][kParameterBatchCount] = {};
-    double delta_couple[4][3][kParameterBatchCount] = {};
+    Real delta_force[4][3][kParameterBatchCount] = {};
+    Real delta_couple[4][3][kParameterBatchCount] = {};
     for (int body = 0; body < 4; ++body) {
         for (int component = 0; component < 3; ++component) {
             delta_force[body][component][body] =
@@ -669,13 +664,13 @@ void evaluate_parameter_directions(const StageData& stage,
 
     // 反向递推：δm_i = δN_i + c_i × δF_i + δm_{i+1} + r_{i+1} × δf_{i+1}，
     //           δb_i = a_i · δm_i
-    double child_force[3][kParameterBatchCount] = {};
-    double child_moment[3][kParameterBatchCount] = {};
+    Real child_force[3][kParameterBatchCount] = {};
+    Real child_moment[3][kParameterBatchCount] = {};
     for (int i = 3; i >= 0; --i) {
         const Vector3d& axis = stage.chain.axis[i];
         const Vector3d com_relative = stage.chain.com[i] - stage.chain.joint_origin[i];
         for (int direction = 0; direction < kParameterBatchCount; ++direction) {
-            double moment[3];
+            Real moment[3];
             for (int component = 0; component < 3; ++component) {
                 moment[component] = delta_couple[i][component][direction];
             }
@@ -694,7 +689,7 @@ void evaluate_parameter_directions(const StageData& stage,
                 moment[2] += child_moment[2][direction] + offset[0] * child_force[1][direction] -
                              offset[1] * child_force[0][direction];
             }
-            double value = 0.0;
+            Real value = 0.0;
             for (int component = 0; component < 3; ++component) {
                 value += axis[component] * moment[component];
             }
@@ -729,7 +724,7 @@ struct DirectionDerivatives {
 
 // 由批次取出第 direction 个方向的质量矩阵方向导数
 template <int N>
-Matrix4d evaluate_direction_mass(const StageData& stage, const ScalarModelParameters<double>& model,
+Matrix4d evaluate_direction_mass(const StageData& stage, const ScalarModelParameters<Real>& model,
                                  const SeedBatch<N>& seed,
                                  const std::array<Matrix34d, 4>& weighted_sums, int direction) {
     if (direction < 4) {
@@ -764,10 +759,10 @@ Matrix4d evaluate_direction_mass(const StageData& stage, const ScalarModelParame
 // 批量求全部方向的质量矩阵与偏置力方向导数
 template <int N>
 DirectionDerivatives<N> evaluate_directions(const StageData& stage,
-                                            const ScalarModelParameters<double>& model) {
+                                            const ScalarModelParameters<Real>& model) {
     const SeedBatch<N> seed = build_seed_batch<N>(stage, model);
     const KinematicsBatch<N> kinematics = propagate_kinematics<N>(stage, seed);
-    double delta_bias[4][N];
+    Real delta_bias[4][N];
     evaluate_bias_direction_batch<N>(model, stage, seed, kinematics, delta_bias);
     const std::array<Matrix34d, 4> weighted_sums = evaluate_weighted_jacobian_sums(stage, model);
 
@@ -783,7 +778,7 @@ DirectionDerivatives<N> evaluate_directions(const StageData& stage,
 }
 
 template <int N>
-void fill_state_jacobian(const StageData& stage, const ScalarModelParameters<double>& model,
+void fill_state_jacobian(const StageData& stage, const ScalarModelParameters<Real>& model,
                          const Matrix4d& inverse_mass,
                          const std::array<Matrix4d, N>& mass_derivative,
                          const std::array<Vector4d, N>& bias_derivative,
@@ -809,7 +804,7 @@ void fill_state_jacobian(const StageData& stage, const ScalarModelParameters<dou
 }  // namespace
 
 StageJacobians evaluate_stage_jacobians(const StageData& stage,
-                                        const ScalarModelParameters<double>& model) {
+                                        const ScalarModelParameters<Real>& model) {
     const DirectionDerivatives<kStateDirectionCount> directional =
         evaluate_directions<kStateDirectionCount>(stage, model);
     const Matrix4d inverse_mass = invert_mass(stage);
@@ -827,7 +822,7 @@ StageJacobians evaluate_stage_jacobians(const StageData& stage,
 }
 
 ParameterJacobian evaluate_parameter_jacobian(const StageData& stage,
-                                              const ScalarModelParameters<double>& model,
+                                              const ScalarModelParameters<Real>& model,
                                               math::Matrix8d& state_jacobian) {
     const DirectionDerivatives<kParameterDirectionCount> directional =
         evaluate_directions<kParameterDirectionCount>(stage, model);
@@ -835,8 +830,8 @@ ParameterJacobian evaluate_parameter_jacobian(const StageData& stage,
     fill_state_jacobian<kParameterDirectionCount>(stage, model, inverse_mass, directional.mass,
                                                   directional.bias, state_jacobian);
 
-    double parameter_mass[kParameterBatchCount][16];
-    double parameter_bias[kParameterBatchCount][4];
+    Real parameter_mass[kParameterBatchCount][16];
+    Real parameter_bias[kParameterBatchCount][4];
     evaluate_parameter_directions(stage, model, parameter_mass, parameter_bias);
 
     ParameterJacobian result;

@@ -12,11 +12,13 @@
 #include "gimbal_dynamics/parameter_gradient.hpp"
 #include "gimbal_dynamics/simulation.hpp"
 
+using gimbal::Real;
+
 namespace {
 
 constexpr std::size_t kNumSteps = 20;
 constexpr int kRefinement = 2;
-constexpr double kStep = 0.01;
+constexpr Real kStep = 0.01;
 constexpr int kCalls = 200;
 
 struct Problem {
@@ -43,9 +45,9 @@ Problem make_problem() {
     problem.target_angle.resize(kNumSteps);
     problem.target_velocity.resize(kNumSteps);
     for (std::size_t k = 0; k < kNumSteps; ++k) {
-        const double time = static_cast<double>(k) * kStep;
+        const Real step_time = static_cast<Real>(k) * kStep;
         gimbal::BaseState& base = problem.base[k];
-        base.yaw = 0.2 + 0.4 * time;
+        base.yaw = 0.2 + 0.4 * step_time;
         base.yaw_rate = 0.4;
         base.yaw_acceleration = 0.3;
         base.acceleration[0] = 0.2;
@@ -53,8 +55,8 @@ Problem make_problem() {
         base.acceleration[2] = 0.05;
         problem.torque[k] = gimbal::math::Vector4d::from(0.20, -0.12, 0.06, -0.04);
         for (int i = 0; i < 4; ++i) {
-            problem.target_angle[k][i] = 0.10 * std::sin(0.5 * time + 0.7 * i);
-            problem.target_velocity[k][i] = 0.20 * std::cos(0.3 * time + 0.4 * i);
+            problem.target_angle[k][i] = 0.10 * std::sin(0.5 * step_time + 0.7 * i);
+            problem.target_velocity[k][i] = 0.20 * std::cos(0.3 * step_time + 0.4 * i);
         }
     }
     problem.loss.angle_weights = gimbal::math::Vector4d::from(1.0, 2.0, 0.8, 1.5);
@@ -68,14 +70,14 @@ Problem make_problem() {
 }
 
 template <typename Function>
-double measure_average(Function&& function) {
+Real measure_average(Function&& function) {
     const auto begin = std::chrono::steady_clock::now();
     for (int call = 0; call < kCalls; ++call) {
         function();
     }
     const auto end = std::chrono::steady_clock::now();
-    const double total = std::chrono::duration<double, std::micro>(end - begin).count();
-    return total / static_cast<double>(kCalls);
+    const Real total = std::chrono::duration<Real, std::micro>(end - begin).count();
+    return total / static_cast<Real>(kCalls);
 }
 
 }  // namespace
@@ -87,8 +89,8 @@ int main() {
     {
         gimbal::simulation::Trace trace;
         gimbal::simulation::State state = problem.initial;
-        double checksum = 0.0;
-        double best = 1e9;
+        Real checksum = 0.0;
+        Real best = 1e9;
         for (int batch = 0; batch < 5; ++batch) {
             best = std::min(best, measure_average([&] {
                 checksum += gimbal::simulation::simulate(
@@ -104,8 +106,8 @@ int main() {
     {
         gimbal::control_gradient::Workspace workspace;
         std::vector<gimbal::math::Vector4d> gradient(kNumSteps);
-        double checksum = 0.0;
-        double best = 1e9;
+        Real checksum = 0.0;
+        Real best = 1e9;
         for (int batch = 0; batch < 5; ++batch) {
             gimbal::simulation::State state = problem.initial;
             std::vector<gimbal::math::Vector4d> torque = problem.torque;
@@ -127,8 +129,8 @@ int main() {
     {
         gimbal::parameter_gradient::Workspace workspace;
         gimbal::parameter_gradient::Gradient gradient;
-        double checksum = 0.0;
-        double best = 1e9;
+        Real checksum = 0.0;
+        Real best = 1e9;
         for (int batch = 0; batch < 5; ++batch) {
             gimbal::simulation::State state = problem.initial;
             std::vector<gimbal::math::Vector4d> torque = problem.torque;

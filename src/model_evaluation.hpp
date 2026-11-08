@@ -366,7 +366,7 @@ Vector4<Scalar> evaluate_bias(const ScalarModelParameters<Scalar>& model,
 }
 
 // 求解 M q̈ = rhs（Cholesky 分解）
-inline Vector4<double> solve_mass(const Matrix4<double>& mass, const Vector4<double>& rhs) {
+inline Vector4<Real> solve_mass(const Matrix4<Real>& mass, const Vector4<Real>& rhs) {
     return math::solve4(mass, rhs);
 }
 

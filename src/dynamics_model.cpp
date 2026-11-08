@@ -19,13 +19,13 @@ using Matrix4 = detail::Matrix4<Scalar>;
 template <typename Scalar>
 using Matrix34 = detail::Matrix34<Scalar>;
 
-using Vector3d = Vector3<double>;
-using Matrix3d = Matrix3<double>;
-using Vector4d = Vector4<double>;
-using Matrix4d = Matrix4<double>;
-using Matrix34d = Matrix34<double>;
+using Vector3d = Vector3<Real>;
+using Matrix3d = Matrix3<Real>;
+using Vector4d = Vector4<Real>;
+using Matrix4d = Matrix4<Real>;
+using Matrix34d = Matrix34<Real>;
 
-math::Vector3d vec3(double x, double y, double z) {
+math::Vector3d vec3(Real x, Real y, Real z) {
     math::Vector3d value;
     value[0] = x;
     value[1] = y;
@@ -33,8 +33,8 @@ math::Vector3d vec3(double x, double y, double z) {
     return value;
 }
 
-math::Matrix3d mat3(double xx, double xy, double xz, double yx, double yy, double yz, double zx,
-                    double zy, double zz) {
+math::Matrix3d mat3(Real xx, Real xy, Real xz, Real yx, Real yy, Real yz, Real zx,
+                    Real zy, Real zz) {
     math::Matrix3d value;
     value(0, 0) = xx;
     value(0, 1) = xy;
@@ -91,7 +91,7 @@ DynamicsTerms<Scalar> evaluate_terms(const detail::ScalarModelParameters<Scalar>
 
 // 质量矩阵各量对广义坐标的偏导，用链的方向导数解析求值
 struct Derivatives {
-    DynamicsTerms<double> terms;
+    DynamicsTerms<Real> terms;
     std::array<Matrix4d, 4> mass_derivative{};
     std::array<Vector4d, 4> coupling_derivative{};
     Vector4d base_inertia_derivative = Vector4d::zero();
@@ -113,13 +113,13 @@ Matrix3d skew_matrix(const Vector3d& vector) {
 
 Derivatives evaluate_derivatives(const ModelParameters& model, const Terrain& terrain,
                                  const BaseState& base, const Vector4d& q) {
-    const detail::ScalarModelParameters<double> scalar_model = detail::convert_model<double>(model);
-    const detail::ScalarTerrain<double> scalar_terrain = detail::convert_terrain<double>(terrain);
-    const detail::Chain<double>& chain =
+    const detail::ScalarModelParameters<Real> scalar_model = detail::convert_model<Real>(model);
+    const detail::ScalarTerrain<Real> scalar_terrain = detail::convert_terrain<Real>(terrain);
+    const detail::Chain<Real>& chain =
         detail::evaluate_chain(scalar_model, scalar_terrain, base, q);
 
     Derivatives result;
-    result.terms = evaluate_terms<double>(scalar_model, chain);
+    result.terms = evaluate_terms<Real>(scalar_model, chain);
     const Vector3d& normal = chain.normal;
 
     // 各刚体的速度/角速度雅可比与惯量世界矩阵
@@ -142,7 +142,7 @@ Derivatives evaluate_derivatives(const ModelParameters& model, const Terrain& te
     }
 
     for (int k = 0; k < 4; ++k) {
-        const Matrix3d axis_skew = skew_matrix(detail::axis_local<double>(k));
+        const Matrix3d axis_skew = skew_matrix(detail::axis_local<Real>(k));
         Matrix3d delta_rotation[4];
         for (int i = 0; i < 4; ++i) {
             delta_rotation[i] = Matrix3d::zero();
@@ -173,7 +173,7 @@ Derivatives evaluate_derivatives(const ModelParameters& model, const Terrain& te
             delta_axis[j] = Vector3d::zero();
         }
         for (int j = 1; j < 4; ++j) {
-            delta_axis[j] = delta_rotation[j - 1] * detail::axis_local<double>(j);
+            delta_axis[j] = delta_rotation[j - 1] * detail::axis_local<Real>(j);
         }
         Vector3d delta_com[4];
         for (int i = 0; i < 4; ++i) {
@@ -182,7 +182,7 @@ Derivatives evaluate_derivatives(const ModelParameters& model, const Terrain& te
 
         Matrix4d delta_mass = Matrix4d::zero();
         Vector4d delta_coupling = Vector4d::zero();
-        double delta_base_inertia = 0.0;
+        Real delta_base_inertia = 0.0;
         for (int i = 0; i < 4; ++i) {
             Matrix34d delta_velocity_jacobian = Matrix34d::zero();
             Matrix34d delta_angular_jacobian = Matrix34d::zero();
@@ -228,14 +228,14 @@ Derivatives evaluate_derivatives(const ModelParameters& model, const Terrain& te
 
 // 偏置力 b 与质量矩阵（DYNAMICS.md 7.3）
 struct BiasResult {
-    DynamicsTerms<double> terms;
+    DynamicsTerms<Real> terms;
     Vector4d bias;
 };
 
 BiasResult evaluate_bias(const ModelParameters& model, const Terrain& terrain, const BaseState& base,
                          const Vector4d& q, const Vector4d& qdot) {
     const Derivatives derivatives = evaluate_derivatives(model, terrain, base, q);
-    const DynamicsTerms<double>& terms = derivatives.terms;
+    const DynamicsTerms<Real>& terms = derivatives.terms;
     Vector4d christoffel = Vector4d::zero();
     for (int j = 0; j < 4; ++j) {
         for (int k = 0; k < 4; ++k) {

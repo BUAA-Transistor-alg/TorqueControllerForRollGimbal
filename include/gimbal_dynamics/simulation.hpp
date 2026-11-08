@@ -35,7 +35,7 @@ struct LossSpec {
 
 // 定步长设置：每个主步内做 refinement 次经典 RK4
 struct TrajectorySpec {
-    double step = 0.0;
+    Real step = 0.0;
     int refinement = 1;
 };
 
@@ -60,7 +60,7 @@ math::Vector8d state_derivative(const ModelParameters& model, const Terrain& ter
                                 const math::Vector4d& torque);
 
 // 单步损失（已含 1/K 缩放）
-double step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
+Real step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
                  const State& state, const math::Vector4d& torque);
 
 // 单步损失对状态的梯度，顺序为 4 个关节角、4 个关节角速度
@@ -70,7 +70,7 @@ math::Vector8d step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
 // 前向积分。base 与 torque 的长度均为 num_steps；返回总损失并写满 trace。
 // 底盘量在第 k 个主步内按等角加速度外推：
 //   ψ(τ) = ψ_k + ψ̇_k τ + 1/2 ψ̈_k τ²，ψ̇(τ) = ψ̇_k + ψ̈_k τ，a0 保持不变。
-double simulate(const ModelParameters& model, const Terrain& terrain, const State& initial,
+Real simulate(const ModelParameters& model, const Terrain& terrain, const State& initial,
                 const BaseState* base, const math::Vector4d* torque, std::size_t num_steps,
                 const TrajectorySpec& spec, const LossSpec& loss, Trace& trace);
 
