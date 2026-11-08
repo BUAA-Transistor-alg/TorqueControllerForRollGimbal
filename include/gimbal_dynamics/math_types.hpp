@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <stdexcept>
 
 namespace gimbal {
 namespace math {
@@ -350,43 +351,61 @@ Vector<Scalar, C> operator*(const Vector<Scalar, R>& lhs, const Matrix<Scalar, R
     return result;
 }
 
+// 4x4 对称正定矩阵的 Cholesky 分解，分解一次可反复求解
+struct Cholesky4 {
+    double lower[4][4];
+    bool valid = false;
+
+    void factorize(const Matrix4<double>& mass) {
+        valid = true;
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j <= i; ++j) {
+                double sum = mass.data[i][j];
+                for (int k = 0; k < j; ++k) {
+                    sum -= lower[i][k] * lower[j][k];
+                }
+                if (i == j) {
+                    if (!(sum > 0.0)) {
+                        valid = false;
+                        return;
+                    }
+                    lower[i][j] = std::sqrt(sum);
+                } else {
+                    lower[i][j] = sum / lower[j][j];
+                }
+            }
+        }
+    }
+
+    Vector4<double> solve(const Vector4<double>& rhs) const {
+        double intermediate[4];
+        for (int i = 0; i < 4; ++i) {
+            double sum = rhs.data[i];
+            for (int k = 0; k < i; ++k) {
+                sum -= lower[i][k] * intermediate[k];
+            }
+            intermediate[i] = sum / lower[i][i];
+        }
+        Vector4<double> result;
+        for (int i = 3; i >= 0; --i) {
+            double sum = intermediate[i];
+            for (int k = i + 1; k < 4; ++k) {
+                sum -= lower[k][i] * result.data[k];
+            }
+            result.data[i] = sum / lower[i][i];
+        }
+        return result;
+    }
+};
+
 // 4x4 对称正定求解（Cholesky 分解）
 inline Vector4<double> solve4(const Matrix4<double>& mass, const Vector4<double>& rhs) {
-    double lower[4][4] = {{0.0, 0.0, 0.0, 0.0}, {0.0, 0.0, 0.0, 0.0},
-                          {0.0, 0.0, 0.0, 0.0}, {0.0, 0.0, 0.0, 0.0}};
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j <= i; ++j) {
-            double sum = mass.data[i][j];
-            for (int k = 0; k < j; ++k) {
-                sum -= lower[i][k] * lower[j][k];
-            }
-            if (i == j) {
-                if (!(sum > 0.0)) {
-                    return Vector4<double>::zero();
-                }
-                lower[i][j] = std::sqrt(sum);
-            } else {
-                lower[i][j] = sum / lower[j][j];
-            }
-        }
+    Cholesky4 factor;
+    factor.factorize(mass);
+    if (!factor.valid) {
+        throw std::runtime_error("惯量矩阵不是正定矩阵");
     }
-    double intermediate[4];
-    for (int i = 0; i < 4; ++i) {
-        double sum = rhs.data[i];
-        for (int k = 0; k < i; ++k) {
-            sum -= lower[i][k] * intermediate[k];
-        }
-        intermediate[i] = sum / lower[i][i];
-    }
-    Vector4<double> result;
-    for (int i = 3; i >= 0; --i) {
-        double sum = intermediate[i];
-        for (int k = i + 1; k < 4; ++k) {
-            sum -= lower[k][i] * result.data[k];
-        }
-        result.data[i] = sum / lower[i][i];
-    }
-    return result;
+    return factor.solve(rhs);
 }
 
 }  // namespace math

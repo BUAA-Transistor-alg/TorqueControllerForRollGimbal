@@ -30,18 +30,26 @@ double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
                            const simulation::LossSpec& loss, Workspace& workspace,
                            math::Vector4d* gradient, simulation::State* final_state) {
     simulation::validate(spec, num_steps);
-    if (base == nullptr) {
-        throw std::invalid_argument("base 不能为空");
-    }
-    if (torque == nullptr) {
-        throw std::invalid_argument("torque 不能为空");
-    }
     workspace.resize(num_steps, spec.refinement);
-    const std::size_t refinement_count = static_cast<std::size_t>(spec.refinement);
-    std::vector<detail::StageData> stage_cache(num_steps * refinement_count * 4);
+    const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
+    const double h = spec.step / static_cast<double>(spec.refinement);
+    const detail::ScalarModelParameters<double> scalar_model = detail::convert_model<double>(model);
+
+    // 单遍完成前向仿真与阶段 Jacobian：每个子步结束时把 W 与 Ψ 写入工作区
+    detail::StageJacobians stage[4];
+    const auto stage_visitor = [&](std::size_t stage_index, const detail::StageData& data) {
+        const std::size_t substep = stage_index / 4;
+        const int t = static_cast<int>(stage_index % 4);
+        stage[t] = detail::evaluate_stage_jacobians(data, scalar_model);
+        if (t == 3) {
+            detail::assemble_substep(stage, h, workspace.propagation[substep],
+                                     workspace.input_jacobian[substep]);
+        }
+    };
+    const auto step_visitor = [](std::size_t, const simulation::State&) {};
     const double loss_value = detail::simulate_trajectory(
-        model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace,
-        &stage_cache);
+        model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace, false,
+        stage_visitor, step_visitor);
     if (final_state != nullptr) {
         *final_state = workspace.trace.step_end.back();
     }
@@ -49,26 +57,7 @@ double simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
         return loss_value;
     }
 
-    const double h = spec.step / static_cast<double>(spec.refinement);
-    const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
-    const detail::ScalarModelParameters<double> scalar_model =
-        detail::convert_model<double>(model);
-
-    // 由前向仿真已缓存的阶段中间量直接组装整子步的 W 与 Ψ
-    for (std::size_t k = 0; k < num_steps; ++k) {
-        for (std::size_t s = 0; s < refinement; ++s) {
-            const std::size_t substep = k * refinement + s;
-            detail::StageJacobians stage[4];
-            for (int t = 0; t < 4; ++t) {
-                const std::size_t index = substep * 4 + static_cast<std::size_t>(t);
-                stage[t] = detail::evaluate_stage_jacobians(stage_cache[index], scalar_model);
-            }
-            detail::assemble_substep(stage, h, workspace.propagation[substep],
-                                     workspace.input_jacobian[substep]);
-        }
-    }
-
-    // 反向扫描：协态按子步逆序传播，输入梯度在同一主步内累加
+    // 反向伴随：协态按子步逆序传播，输入梯度在同一主步内累加
     math::Vector8d adjoint = math::Vector8d::zero();
     const double torque_scale = 1.0 / static_cast<double>(num_steps);
     for (std::size_t k = num_steps; k-- > 0;) {

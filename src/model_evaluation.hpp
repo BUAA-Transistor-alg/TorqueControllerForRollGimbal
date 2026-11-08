@@ -191,16 +191,29 @@ struct Chain {
     std::array<Vector3<Scalar>, 4> axis{};
 };
 
+// 地形坐标系与法向量，整个仿真只求值一次
+template <typename Scalar>
+struct TerrainFrame {
+    Matrix3<Scalar> rotation;
+    Vector3<Scalar> normal;
+};
+
+template <typename Scalar>
+TerrainFrame<Scalar> evaluate_terrain_frame(const ScalarTerrain<Scalar>& terrain) {
+    TerrainFrame<Scalar> frame;
+    frame.rotation = rotation_z(terrain.slope_direction) * rotation_y(terrain.slope_angle) *
+                     rotation_z(-terrain.slope_direction);
+    frame.normal = frame.rotation * Vector3<Scalar>::unit(2);
+    return frame;
+}
+
 template <typename Scalar>
 Chain<Scalar> evaluate_chain(const ScalarModelParameters<Scalar>& model,
-                             const ScalarTerrain<Scalar>& terrain, const BaseState& base,
+                             const TerrainFrame<Scalar>& frame, const BaseState& base,
                              const Vector4<Scalar>& q) {
     Chain<Scalar> chain;
-    const Matrix3<Scalar> terrain_frame =
-        rotation_z(terrain.slope_direction) * rotation_y(terrain.slope_angle) *
-        rotation_z(-terrain.slope_direction);
-    const Matrix3<Scalar> base_rotation = terrain_frame * rotation_z(Scalar(base.yaw));
-    chain.normal = terrain_frame * Vector3<Scalar>::unit(2);
+    const Matrix3<Scalar> base_rotation = frame.rotation * rotation_z(Scalar(base.yaw));
+    chain.normal = frame.normal;
     Matrix3<Scalar> parent_rotation = base_rotation;
     Vector3<Scalar> parent_origin = Vector3<Scalar>::zero();
     for (int joint = 0; joint < 4; ++joint) {
@@ -218,12 +231,19 @@ Chain<Scalar> evaluate_chain(const ScalarModelParameters<Scalar>& model,
     return chain;
 }
 
+template <typename Scalar>
+Chain<Scalar> evaluate_chain(const ScalarModelParameters<Scalar>& model,
+                             const ScalarTerrain<Scalar>& terrain, const BaseState& base,
+                             const Vector4<Scalar>& q) {
+    return evaluate_chain(model, evaluate_terrain_frame(terrain), base, q);
+}
+
 // 质量矩阵求值的中间量，供导数阶段复用
 template <typename Scalar>
 struct MassInternals {
-    std::array<Matrix34<Scalar>, 4> velocity_jacobian{};
-    std::array<Matrix34<Scalar>, 4> angular_jacobian{};
-    std::array<Matrix3<Scalar>, 4> inertia_world{};
+    std::array<Matrix34<Scalar>, 4> velocity_jacobian;
+    std::array<Matrix34<Scalar>, 4> angular_jacobian;
+    std::array<Matrix3<Scalar>, 4> inertia_world;
 };
 
 // 质量矩阵 M（DYNAMICS.md 7.2）
@@ -259,14 +279,14 @@ Matrix4<Scalar> evaluate_mass_matrix(const ScalarModelParameters<Scalar>& model,
 // 偏置力递推的中间量，供导数阶段复用
 template <typename Scalar>
 struct BiasInternals {
-    std::array<Vector3<Scalar>, 4> omega{};
-    std::array<Vector3<Scalar>, 4> alpha{};
-    std::array<Vector3<Scalar>, 4> origin_acceleration{};
-    std::array<Vector3<Scalar>, 4> com_acceleration{};
-    std::array<Vector3<Scalar>, 4> force{};
-    std::array<Vector3<Scalar>, 4> couple{};
-    std::array<Vector3<Scalar>, 4> joint_force{};
-    std::array<Vector3<Scalar>, 4> joint_moment{};
+    std::array<Vector3<Scalar>, 4> omega;
+    std::array<Vector3<Scalar>, 4> alpha;
+    std::array<Vector3<Scalar>, 4> origin_acceleration;
+    std::array<Vector3<Scalar>, 4> com_acceleration;
+    std::array<Vector3<Scalar>, 4> force;
+    std::array<Vector3<Scalar>, 4> couple;
+    std::array<Vector3<Scalar>, 4> joint_force;
+    std::array<Vector3<Scalar>, 4> joint_moment;
 };
 
 // 偏置力 b：逆动力学递推（DYNAMICS.md 第 8 节），令 q̈ = 0。

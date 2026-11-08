@@ -173,10 +173,11 @@ SeedBatch<N> build_seed_batch(const StageData& stage,
     // 广义坐标方向 0..3
     for (int k = 0; k < 4; ++k) {
         const Matrix3d axis_skew = skew_matrix(axis_local<double>(k));
+        const Matrix3d rotation_derivative =
+            chain.rotation[k] * axis_skew * transpose(chain.rotation[k]);
         ArrayMatrix delta_rotation = zero_matrices();
         for (int i = k; i < 4; ++i) {
-            delta_rotation[i] = chain.rotation[k] * axis_skew *
-                                transpose(chain.rotation[k]) * chain.rotation[i];
+            delta_rotation[i] = rotation_derivative * chain.rotation[i];
         }
         Array3 delta_offset = zero_vectors();
         for (int m = 1; m < 4; ++m) {
@@ -520,114 +521,199 @@ Matrix4d evaluate_mass_direction(const StageData& stage, const ScalarModelParame
     return mass_derivative;
 }
 
-// 刚体质心参数方向的质量矩阵方向导数（只有该刚体的雅可比变化）
+// 后缀加权的速度雅可比和：suffix[joint] = Σ_{i ≥ joint} m_i Jv_i
+std::array<Matrix34d, 4> evaluate_weighted_jacobian_sums(const StageData& stage,
+                                                        const ScalarModelParameters<double>& model) {
+    std::array<Matrix34d, 4> suffix;
+    for (int joint = 0; joint < 4; ++joint) {
+        suffix[joint] = Matrix34d::zero();
+    }
+    for (int i = 3; i >= 0; --i) {
+        const Matrix34d& velocity_jacobian = stage.mass_internals.velocity_jacobian[i];
+        for (int joint = 0; joint <= i; ++joint) {
+            suffix[joint] = suffix[joint] + velocity_jacobian * model.bodies[i].mass;
+        }
+    }
+    return suffix;
+}
+
+// 刚体质心参数方向的质量矩阵方向导数：只有该刚体的雅可比列变化
 Matrix4d evaluate_mass_direction_com(const StageData& stage,
                                      const ScalarModelParameters<double>& model, int body,
                                      const Vector3d& delta_com_relative) {
     const Matrix34d& velocity_jacobian = stage.mass_internals.velocity_jacobian[body];
-    Matrix34d velocity_jacobian_derivative = Matrix34d::zero();
+    const double body_mass = model.bodies[body].mass;
+    Vector3d axis_cross[4];
     for (int joint = 0; joint <= body; ++joint) {
-        const Vector3d column = cross_product(stage.chain.axis[joint], delta_com_relative);
-        for (int row = 0; row < 3; ++row) {
-            velocity_jacobian_derivative(row, joint) = column[row];
-        }
+        axis_cross[joint] = cross_product(stage.chain.axis[joint], delta_com_relative);
     }
-    return model.bodies[body].mass *
-           (transpose(velocity_jacobian_derivative) * velocity_jacobian +
-            transpose(velocity_jacobian) * velocity_jacobian_derivative);
-}
-
-// 关节安装偏置方向的质量矩阵方向导数：i ≥ joint 且 j < joint 的雅可比项变化
-Matrix4d evaluate_mass_direction_offset(const StageData& stage,
-                                        const ScalarModelParameters<double>& model, int joint,
-                                        const Vector3d& delta_offset) {
     Matrix4d mass_derivative = Matrix4d::zero();
-    for (int i = joint; i < 4; ++i) {
-        const Matrix34d& velocity_jacobian = stage.mass_internals.velocity_jacobian[i];
-        Matrix34d velocity_jacobian_derivative = Matrix34d::zero();
-        for (int smaller = 0; smaller < joint; ++smaller) {
-            const Vector3d column = cross_product(stage.chain.axis[smaller], delta_offset);
-            for (int row = 0; row < 3; ++row) {
-                velocity_jacobian_derivative(row, smaller) = column[row];
+    for (int row = 0; row <= body; ++row) {
+        for (int column = 0; column <= body; ++column) {
+            double value = 0.0;
+            for (int component = 0; component < 3; ++component) {
+                value += axis_cross[row][component] * velocity_jacobian(component, column) +
+                         velocity_jacobian(component, row) * axis_cross[column][component];
             }
+            mass_derivative(row, column) = body_mass * value;
         }
-        mass_derivative += model.bodies[i].mass *
-                           (transpose(velocity_jacobian_derivative) * velocity_jacobian +
-                            transpose(velocity_jacobian) * velocity_jacobian_derivative);
     }
     return mass_derivative;
 }
 
-// 偏置力对力/力偶方向导数的响应（质量、惯量参数方向使用）
-Vector4d bias_direction_from_internal(const StageData& stage, const Array3& delta_force,
-                                      const Array3& delta_couple) {
-    Vector4d result = Vector4d::zero();
-    Vector3d child_force = Vector3d::zero();
-    Vector3d child_moment = Vector3d::zero();
-    for (int i = 3; i >= 0; --i) {
-        Vector3d moment = delta_couple[i] +
-            cross_product(stage.chain.com[i] - stage.chain.joint_origin[i], delta_force[i]);
-        if (i < 3) {
-            moment += child_moment + cross_product(stage.chain.offset[i + 1], child_force);
+// 关节安装偏置方向的质量矩阵方向导数：i ≥ joint 且 j < joint 的雅可比项变化
+Matrix4d evaluate_mass_direction_offset(const StageData& stage, int joint,
+                                        const Vector3d& delta_offset,
+                                        const std::array<Matrix34d, 4>& weighted_sums) {
+    const Matrix34d& weighted = weighted_sums[joint];
+    Vector3d axis_cross[4];
+    for (int smaller = 0; smaller < joint; ++smaller) {
+        axis_cross[smaller] = cross_product(stage.chain.axis[smaller], delta_offset);
+    }
+    Matrix4d mass_derivative = Matrix4d::zero();
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            double value = 0.0;
+            if (row < joint) {
+                for (int component = 0; component < 3; ++component) {
+                    value += axis_cross[row][component] * weighted(component, column);
+                }
+            }
+            if (column < joint) {
+                for (int component = 0; component < 3; ++component) {
+                    value += weighted(component, row) * axis_cross[column][component];
+                }
+            }
+            mass_derivative(row, column) = value;
         }
-        result[i] = dot_product(stage.chain.axis[i], moment);
-        child_force = delta_force[i] + child_force;
-        child_moment = moment;
     }
-    return result;
+    return mass_derivative;
 }
 
-// 质量参数：dM/dm_i = Jv_i^T Jv_i，dF_i = a_g,i - g_W
-void mass_parameter_direction(const StageData& stage, const ScalarModelParameters<double>& model,
-                              int body, Matrix4d& mass_derivative, Vector4d& bias_derivative) {
-    const Matrix34d& velocity_jacobian = stage.mass_internals.velocity_jacobian[body];
-    mass_derivative = transpose(velocity_jacobian) * velocity_jacobian;
-    Array3 delta_force;
-    Array3 delta_couple;
-    for (int i = 0; i < 4; ++i) {
-        delta_force[i].setZero();
-        delta_couple[i].setZero();
-    }
-    delta_force[body] = stage.bias_internals.com_acceleration[body];
-    delta_force[body][2] += model.gravity;
-    bias_derivative = bias_direction_from_internal(stage, delta_force, delta_couple);
-}
+// 28 个参数方向（质量 4 个、惯量 24 个）的质量矩阵与偏置力方向导数。
+// 方向编号：0..3 为按刚体的质量，4 + 6*body + entry 为惯量的对称分量。
+constexpr int kParameterBatchCount = 28;
 
-// 惯量参数：对称分量 (row,column)
-void inertia_parameter_direction(const StageData& stage, int body, int entry,
-                                 Matrix4d& mass_derivative, Vector4d& bias_derivative) {
+void evaluate_parameter_directions(const StageData& stage,
+                                   const ScalarModelParameters<double>& model,
+                                   double mass_derivative[kParameterBatchCount][16],
+                                   double bias_derivative[kParameterBatchCount][4]) {
     static constexpr int kRow[6] = {0, 1, 2, 0, 0, 1};
     static constexpr int kColumn[6] = {0, 1, 2, 1, 2, 2};
-    const int row = kRow[entry];
-    const int column = kColumn[entry];
-    Matrix3d inertia_direction = Matrix3d::zero();
-    inertia_direction(row, column) += 1.0;
-    if (row != column) {
-        inertia_direction(column, row) += 1.0;
+
+    // 质量参数：dM/dm_i = Jv_i^T Jv_i
+    for (int body = 0; body < 4; ++body) {
+        const Matrix34d& velocity_jacobian = stage.mass_internals.velocity_jacobian[body];
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                double sum = 0.0;
+                for (int component = 0; component < 3; ++component) {
+                    sum += velocity_jacobian(component, row) *
+                           velocity_jacobian(component, column);
+                }
+                mass_derivative[body][row * 4 + column] = sum;
+            }
+        }
     }
-    const Matrix3d& rotation = stage.chain.rotation[body];
-    const Matrix3d inertia_world_direction = rotation * inertia_direction * transpose(rotation);
-    const Matrix34d& angular_jacobian = stage.mass_internals.angular_jacobian[body];
-    mass_derivative = transpose(angular_jacobian) * inertia_world_direction * angular_jacobian;
-    Array3 delta_force;
-    Array3 delta_couple;
-    for (int i = 0; i < 4; ++i) {
-        delta_force[i].setZero();
-        delta_couple[i].setZero();
+    // 惯量参数：dM/dE = A^T E A，A = R^T Jw
+    for (int body = 0; body < 4; ++body) {
+        const Matrix3d& rotation = stage.chain.rotation[body];
+        const Matrix34d& angular_jacobian = stage.mass_internals.angular_jacobian[body];
+        const Matrix34d local_jacobian = transpose(rotation) * angular_jacobian;
+        for (int entry = 0; entry < 6; ++entry) {
+            const int direction = 4 + 6 * body + entry;
+            const int row_index = kRow[entry];
+            const int column_index = kColumn[entry];
+            for (int row = 0; row < 4; ++row) {
+                for (int column = 0; column < 4; ++column) {
+                    double sum = local_jacobian(row_index, row) *
+                                 local_jacobian(column_index, column);
+                    if (row_index != column_index) {
+                        sum += local_jacobian(column_index, row) *
+                               local_jacobian(row_index, column);
+                    }
+                    mass_derivative[direction][row * 4 + column] = sum;
+                }
+            }
+        }
     }
-    const Vector3d& omega = stage.bias_internals.omega[body];
-    const Vector3d& alpha = stage.bias_internals.alpha[body];
-    delta_couple[body] = inertia_world_direction * alpha +
-                         cross_product(omega, inertia_world_direction * omega);
-    bias_derivative = bias_direction_from_internal(stage, delta_force, delta_couple);
+
+    // 偏置力：质量参数给力，惯量参数给力偶
+    double delta_force[4][3][kParameterBatchCount] = {};
+    double delta_couple[4][3][kParameterBatchCount] = {};
+    for (int body = 0; body < 4; ++body) {
+        for (int component = 0; component < 3; ++component) {
+            delta_force[body][component][body] =
+                stage.bias_internals.com_acceleration[body][component];
+        }
+        delta_force[body][2][body] += model.gravity;
+        const Matrix3d& rotation = stage.chain.rotation[body];
+        const Vector3d& omega = stage.bias_internals.omega[body];
+        const Vector3d& alpha = stage.bias_internals.alpha[body];
+        for (int entry = 0; entry < 6; ++entry) {
+            const int direction = 4 + 6 * body + entry;
+            Matrix3d inertia_direction = Matrix3d::zero();
+            inertia_direction(kRow[entry], kColumn[entry]) += 1.0;
+            if (kRow[entry] != kColumn[entry]) {
+                inertia_direction(kColumn[entry], kRow[entry]) += 1.0;
+            }
+            const Matrix3d inertia_world_direction =
+                rotation * inertia_direction * transpose(rotation);
+            const Vector3d couple = inertia_world_direction * alpha +
+                                    cross_product(omega, inertia_world_direction * omega);
+            for (int component = 0; component < 3; ++component) {
+                delta_couple[body][component][direction] = couple[component];
+            }
+        }
+    }
+
+    // 反向递推：δm_i = δN_i + c_i × δF_i + δm_{i+1} + r_{i+1} × δf_{i+1}，
+    //           δb_i = a_i · δm_i
+    double child_force[3][kParameterBatchCount] = {};
+    double child_moment[3][kParameterBatchCount] = {};
+    for (int i = 3; i >= 0; --i) {
+        const Vector3d& axis = stage.chain.axis[i];
+        const Vector3d com_relative = stage.chain.com[i] - stage.chain.joint_origin[i];
+        for (int direction = 0; direction < kParameterBatchCount; ++direction) {
+            double moment[3];
+            for (int component = 0; component < 3; ++component) {
+                moment[component] = delta_couple[i][component][direction];
+            }
+            moment[0] += com_relative[1] * delta_force[i][2][direction] -
+                         com_relative[2] * delta_force[i][1][direction];
+            moment[1] += com_relative[2] * delta_force[i][0][direction] -
+                         com_relative[0] * delta_force[i][2][direction];
+            moment[2] += com_relative[0] * delta_force[i][1][direction] -
+                         com_relative[1] * delta_force[i][0][direction];
+            if (i < 3) {
+                const Vector3d& offset = stage.chain.offset[i + 1];
+                moment[0] += child_moment[0][direction] + offset[1] * child_force[2][direction] -
+                             offset[2] * child_force[1][direction];
+                moment[1] += child_moment[1][direction] + offset[2] * child_force[0][direction] -
+                             offset[0] * child_force[2][direction];
+                moment[2] += child_moment[2][direction] + offset[0] * child_force[1][direction] -
+                             offset[1] * child_force[0][direction];
+            }
+            double value = 0.0;
+            for (int component = 0; component < 3; ++component) {
+                value += axis[component] * moment[component];
+            }
+            bias_derivative[direction][i] = value;
+            for (int component = 0; component < 3; ++component) {
+                child_force[component][direction] += delta_force[i][component][direction];
+                child_moment[component][direction] = moment[component];
+            }
+        }
+    }
 }
 
-Matrix4d invert_mass(const Matrix4d& mass) {
+// 复用阶段数据里已有的 Cholesky 分解求逆矩阵的四列
+Matrix4d invert_mass(const StageData& stage) {
     Matrix4d inverse = Matrix4d::zero();
     for (int column = 0; column < 4; ++column) {
         Vector4d unit = Vector4d::zero();
         unit[column] = 1.0;
-        const Vector4d solution = solve_mass(mass, unit);
+        const Vector4d solution = stage.factor.solve(unit);
         for (int row = 0; row < 4; ++row) {
             inverse(row, column) = solution[row];
         }
@@ -644,7 +730,8 @@ struct DirectionDerivatives {
 // 由批次取出第 direction 个方向的质量矩阵方向导数
 template <int N>
 Matrix4d evaluate_direction_mass(const StageData& stage, const ScalarModelParameters<double>& model,
-                                 const SeedBatch<N>& seed, int direction) {
+                                 const SeedBatch<N>& seed,
+                                 const std::array<Matrix34d, 4>& weighted_sums, int direction) {
     if (direction < 4) {
         const Array3 delta_axis = extract_vectors(seed.axis, direction);
         const Array3 delta_com = extract_vectors(seed.com, direction);
@@ -671,7 +758,7 @@ Matrix4d evaluate_direction_mass(const StageData& stage, const ScalarModelParame
     }
     const int joint = (direction - 20) / 3;
     const Vector3d delta_offset = extract_vector(seed.offset[joint], direction);
-    return evaluate_mass_direction_offset(stage, model, joint, delta_offset);
+    return evaluate_mass_direction_offset(stage, joint, delta_offset, weighted_sums);
 }
 
 // 批量求全部方向的质量矩阵与偏置力方向导数
@@ -682,13 +769,15 @@ DirectionDerivatives<N> evaluate_directions(const StageData& stage,
     const KinematicsBatch<N> kinematics = propagate_kinematics<N>(stage, seed);
     double delta_bias[4][N];
     evaluate_bias_direction_batch<N>(model, stage, seed, kinematics, delta_bias);
+    const std::array<Matrix34d, 4> weighted_sums = evaluate_weighted_jacobian_sums(stage, model);
 
     DirectionDerivatives<N> result;
     for (int direction = 0; direction < N; ++direction) {
         result.bias[direction] =
             Vector4d::from(delta_bias[0][direction], delta_bias[1][direction],
                            delta_bias[2][direction], delta_bias[3][direction]);
-        result.mass[direction] = evaluate_direction_mass<N>(stage, model, seed, direction);
+        result.mass[direction] =
+            evaluate_direction_mass<N>(stage, model, seed, weighted_sums, direction);
     }
     return result;
 }
@@ -723,7 +812,7 @@ StageJacobians evaluate_stage_jacobians(const StageData& stage,
                                         const ScalarModelParameters<double>& model) {
     const DirectionDerivatives<kStateDirectionCount> directional =
         evaluate_directions<kStateDirectionCount>(stage, model);
-    const Matrix4d inverse_mass = invert_mass(stage.mass);
+    const Matrix4d inverse_mass = invert_mass(stage);
 
     StageJacobians result;
     fill_state_jacobian<kStateDirectionCount>(stage, model, inverse_mass, directional.mass,
@@ -742,9 +831,13 @@ ParameterJacobian evaluate_parameter_jacobian(const StageData& stage,
                                               math::Matrix8d& state_jacobian) {
     const DirectionDerivatives<kParameterDirectionCount> directional =
         evaluate_directions<kParameterDirectionCount>(stage, model);
-    const Matrix4d inverse_mass = invert_mass(stage.mass);
+    const Matrix4d inverse_mass = invert_mass(stage);
     fill_state_jacobian<kParameterDirectionCount>(stage, model, inverse_mass, directional.mass,
                                                   directional.bias, state_jacobian);
+
+    double parameter_mass[kParameterBatchCount][16];
+    double parameter_bias[kParameterBatchCount][4];
+    evaluate_parameter_directions(stage, model, parameter_mass, parameter_bias);
 
     ParameterJacobian result;
     result.setZero();
@@ -752,17 +845,18 @@ ParameterJacobian evaluate_parameter_jacobian(const StageData& stage,
         Matrix4d delta_mass = Matrix4d::zero();
         Vector4d delta_bias = Vector4d::zero();
         Vector4d delta_damping_production = Vector4d::zero();
+        int parameter_direction = -1;
         if (index < parameters::kBodyCount * parameters::kBodyParameterCount) {
             const int body = index / parameters::kBodyParameterCount;
             const int slot = index % parameters::kBodyParameterCount;
             if (slot == 0) {
-                mass_parameter_direction(stage, model, body, delta_mass, delta_bias);
+                parameter_direction = body;
             } else if (slot <= 3) {
                 const int direction = kStateDirectionCount + 3 * body + (slot - 1);
                 delta_mass = directional.mass[direction];
                 delta_bias = directional.bias[direction];
             } else {
-                inertia_parameter_direction(stage, body, slot - 4, delta_mass, delta_bias);
+                parameter_direction = 4 + 6 * body + (slot - 4);
             }
         } else if (index < parameters::kBodyCount * parameters::kBodyParameterCount +
                                parameters::kOffsetParameterCount) {
@@ -774,6 +868,15 @@ ParameterJacobian evaluate_parameter_jacobian(const StageData& stage,
             const int joint = index - (parameters::kParameterCount -
                                        parameters::kDampingParameterCount);
             delta_damping_production[joint] = stage.qdot[joint];
+        }
+        if (parameter_direction >= 0) {
+            for (int row = 0; row < 4; ++row) {
+                for (int column = 0; column < 4; ++column) {
+                    delta_mass(row, column) =
+                        parameter_mass[parameter_direction][row * 4 + column];
+                }
+                delta_bias[row] = parameter_bias[parameter_direction][row];
+            }
         }
         const Vector4d column = inverse_mass * (-delta_damping_production - delta_bias -
                                                 delta_mass * stage.acceleration);

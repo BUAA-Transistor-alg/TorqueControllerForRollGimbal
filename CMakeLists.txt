@@ -29,6 +29,13 @@ if(GIMBAL_VECTORIZE AND GIMBAL_HAS_AVX2)
 endif()
 target_compile_options(gimbal_dynamics PRIVATE ${GIMBAL_HOT_FLAGS})
 
+option(GIMBAL_DYNAMICS_BUILD_BENCHMARKS "构建基准程序" ON)
+if(GIMBAL_DYNAMICS_BUILD_BENCHMARKS)
+    add_executable(sequential_benchmark benchmarks/sequential_benchmark.cpp)
+    target_link_libraries(sequential_benchmark PRIVATE gimbal_dynamics)
+    target_compile_options(sequential_benchmark PRIVATE -Wall -Wextra)
+endif()
+
 option(GIMBAL_DYNAMICS_BUILD_TESTS "构建校验程序" ON)
 if(GIMBAL_DYNAMICS_BUILD_TESTS)
     enable_testing()

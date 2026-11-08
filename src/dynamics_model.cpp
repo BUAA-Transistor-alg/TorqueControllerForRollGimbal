@@ -147,9 +147,10 @@ Derivatives evaluate_derivatives(const ModelParameters& model, const Terrain& te
         for (int i = 0; i < 4; ++i) {
             delta_rotation[i] = Matrix3d::zero();
         }
+        const Matrix3d rotation_derivative =
+            chain.rotation[k] * axis_skew * transpose(chain.rotation[k]);
         for (int i = k; i < 4; ++i) {
-            delta_rotation[i] = chain.rotation[k] * axis_skew * transpose(chain.rotation[k]) *
-                                chain.rotation[i];
+            delta_rotation[i] = rotation_derivative * chain.rotation[i];
         }
         Vector3d delta_offset[4];
         Vector3d delta_origin[4];

@@ -6,19 +6,23 @@ namespace gimbal {
 namespace detail {
 
 void evaluate_stage_data(const ScalarModelParameters<double>& model,
-                         const ScalarTerrain<double>& terrain, const BaseState& base,
+                         const TerrainFrame<double>& frame, const BaseState& base,
                          const simulation::State& state, const math::Vector4d& torque,
                          StageData& out) {
     out.base = base;
     out.angle = state.angle;
     out.qdot = state.velocity;
     out.torque = torque;
-    out.chain = evaluate_chain(model, terrain, base, out.angle);
+    out.chain = evaluate_chain(model, frame, base, out.angle);
     out.mass = evaluate_mass_matrix(model, out.chain, &out.mass_internals);
     out.bias = evaluate_bias(model, out.chain, base, out.qdot, &out.bias_internals,
                              &out.mass_internals);
     out.right_hand_side = torque - elementwise(model.damping, out.qdot) - out.bias;
-    out.acceleration = solve_mass(out.mass, out.right_hand_side);
+    out.factor.factorize(out.mass);
+    if (!out.factor.valid) {
+        throw std::runtime_error("惯量矩阵不是正定矩阵");
+    }
+    out.acceleration = out.factor.solve(out.right_hand_side);
 }
 
 }  // namespace detail

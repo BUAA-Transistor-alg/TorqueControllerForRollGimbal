@@ -16,21 +16,22 @@ namespace detail {
 
 struct StageData {
     BaseState base;
-    math::Vector4d angle = math::Vector4d::zero();
-    math::Vector4d qdot = math::Vector4d::zero();
-    math::Vector4d torque = math::Vector4d::zero();
+    math::Vector4d angle;
+    math::Vector4d qdot;
+    math::Vector4d torque;
     Chain<double> chain;
     MassInternals<double> mass_internals;
     BiasInternals<double> bias_internals;
-    math::Matrix4d mass = math::Matrix4d::zero();
-    math::Vector4d bias = math::Vector4d::zero();
-    math::Vector4d right_hand_side = math::Vector4d::zero();
-    math::Vector4d acceleration = math::Vector4d::zero();
+    math::Matrix4d mass;
+    math::Cholesky4 factor;
+    math::Vector4d bias;
+    math::Vector4d right_hand_side;
+    math::Vector4d acceleration;
 };
 
 // 由阶段状态与力矩求值全部正演中间量（就地写入，避免大对象拷贝）
 void evaluate_stage_data(const ScalarModelParameters<double>& model,
-                         const ScalarTerrain<double>& terrain, const BaseState& base,
+                         const TerrainFrame<double>& frame, const BaseState& base,
                          const simulation::State& state, const math::Vector4d& torque,
                          StageData& out);
 
