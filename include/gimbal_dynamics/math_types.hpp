@@ -1,10 +1,9 @@
 #pragma once
 
-// 固定尺寸向量/矩阵与基础运算（替换 Eigen）。
-// 行主序存储；模板标量同时支持 double 与 std::complex<double>。
+// 固定尺寸向量/矩阵与基础运算。
+// 行主序存储，模板标量为 double。
 
 #include <cmath>
-#include <complex>
 #include <cstddef>
 
 namespace gimbal {
@@ -386,37 +385,6 @@ inline Vector4<double> solve4(const Matrix4<double>& mass, const Vector4<double>
             sum -= lower[k][i] * result.data[k];
         }
         result.data[i] = sum / lower[i][i];
-    }
-    return result;
-}
-
-using Complex = std::complex<double>;
-
-// 复数右端项：实部做 Cholesky 求解，虚部按一阶展开修正
-inline Vector4<Complex> solve4(const Matrix4<Complex>& mass, const Vector4<Complex>& rhs) {
-    Matrix4<double> real_mass;
-    Matrix4<double> imag_mass;
-    Vector4<double> real_rhs;
-    Vector4<double> imag_rhs;
-    for (int r = 0; r < 4; ++r) {
-        real_rhs.data[r] = rhs.data[r].real();
-        imag_rhs.data[r] = rhs.data[r].imag();
-        for (int c = 0; c < 4; ++c) {
-            real_mass.data[r][c] = mass.data[r][c].real();
-            imag_mass.data[r][c] = mass.data[r][c].imag();
-        }
-    }
-    const Vector4<double> real_solution = solve4(real_mass, real_rhs);
-    Vector4<double> corrected = imag_rhs;
-    for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < 4; ++c) {
-            corrected.data[r] -= imag_mass.data[r][c] * real_solution.data[c];
-        }
-    }
-    const Vector4<double> imag_solution = solve4(real_mass, corrected);
-    Vector4<Complex> result;
-    for (int i = 0; i < 4; ++i) {
-        result.data[i] = Complex(real_solution.data[i], imag_solution.data[i]);
     }
     return result;
 }

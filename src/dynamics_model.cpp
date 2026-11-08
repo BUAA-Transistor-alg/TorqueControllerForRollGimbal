@@ -1,15 +1,12 @@
 #include "gimbal_dynamics/dynamics_model.hpp"
 
 #include <array>
-#include <complex>
 #include <stdexcept>
 
 #include "model_evaluation.hpp"
 
 namespace gimbal {
 namespace {
-
-using Complex = std::complex<double>;
 
 template <typename Scalar>
 using Vector3 = detail::Vector3<Scalar>;
@@ -26,6 +23,7 @@ using Vector3d = Vector3<double>;
 using Matrix3d = Matrix3<double>;
 using Vector4d = Vector4<double>;
 using Matrix4d = Matrix4<double>;
+using Matrix34d = Matrix34<double>;
 
 math::Vector3d vec3(double x, double y, double z) {
     math::Vector3d value;
@@ -91,7 +89,7 @@ DynamicsTerms<Scalar> evaluate_terms(const detail::ScalarModelParameters<Scalar>
     return terms;
 }
 
-// 质量矩阵各量对广义坐标的偏导，复步长精确求值
+// 质量矩阵各量对广义坐标的偏导，用链的方向导数解析求值
 struct Derivatives {
     DynamicsTerms<double> terms;
     std::array<Matrix4d, 4> mass_derivative{};
@@ -99,32 +97,130 @@ struct Derivatives {
     Vector4d base_inertia_derivative = Vector4d::zero();
 };
 
+Matrix3d skew_matrix(const Vector3d& vector) {
+    Matrix3d matrix;
+    matrix.data[0][0] = 0.0;
+    matrix.data[0][1] = -vector[2];
+    matrix.data[0][2] = vector[1];
+    matrix.data[1][0] = vector[2];
+    matrix.data[1][1] = 0.0;
+    matrix.data[1][2] = -vector[0];
+    matrix.data[2][0] = -vector[1];
+    matrix.data[2][1] = vector[0];
+    matrix.data[2][2] = 0.0;
+    return matrix;
+}
+
 Derivatives evaluate_derivatives(const ModelParameters& model, const Terrain& terrain,
                                  const BaseState& base, const Vector4d& q) {
     const detail::ScalarModelParameters<double> scalar_model = detail::convert_model<double>(model);
     const detail::ScalarTerrain<double> scalar_terrain = detail::convert_terrain<double>(terrain);
-    const detail::ScalarModelParameters<Complex> complex_model = detail::convert_model<Complex>(model);
-    const detail::ScalarTerrain<Complex> complex_terrain = detail::convert_terrain<Complex>(terrain);
+    const detail::Chain<double>& chain =
+        detail::evaluate_chain(scalar_model, scalar_terrain, base, q);
 
     Derivatives result;
-    result.terms = evaluate_terms<double>(
-        scalar_model, detail::evaluate_chain(scalar_model, scalar_terrain, base, q));
-    for (int k = 0; k < 4; ++k) {
-        detail::Vector4<Complex> perturbed;
-        for (int i = 0; i < 4; ++i) {
-            perturbed[i] = Complex(q[i], i == k ? detail::kComplexStep : 0.0);
-        }
-        const DynamicsTerms<Complex> terms = evaluate_terms<Complex>(
-            complex_model, detail::evaluate_chain(complex_model, complex_terrain, base, perturbed));
-        for (int row = 0; row < 4; ++row) {
-            for (int column = 0; column < 4; ++column) {
-                result.mass_derivative[k](row, column) =
-                    terms.mass(row, column).imag() / detail::kComplexStep;
+    result.terms = evaluate_terms<double>(scalar_model, chain);
+    const Vector3d& normal = chain.normal;
+
+    // 各刚体的速度/角速度雅可比与惯量世界矩阵
+    Matrix34d velocity_jacobian[4];
+    Matrix34d angular_jacobian[4];
+    Matrix3d inertia_world[4];
+    for (int i = 0; i < 4; ++i) {
+        velocity_jacobian[i] = Matrix34d::zero();
+        angular_jacobian[i] = Matrix34d::zero();
+        for (int joint = 0; joint <= i; ++joint) {
+            const Vector3d column = detail::cross_product(
+                chain.axis[joint], chain.com[i] - chain.joint_origin[joint]);
+            for (int row = 0; row < 3; ++row) {
+                velocity_jacobian[i](row, joint) = column[row];
+                angular_jacobian[i](row, joint) = chain.axis[joint][row];
             }
-            result.coupling_derivative[k][row] =
-                terms.coupling[row].imag() / detail::kComplexStep;
         }
-        result.base_inertia_derivative[k] = terms.base_inertia.imag() / detail::kComplexStep;
+        inertia_world[i] =
+            chain.rotation[i] * scalar_model.bodies[i].inertia * transpose(chain.rotation[i]);
+    }
+
+    for (int k = 0; k < 4; ++k) {
+        const Matrix3d axis_skew = skew_matrix(detail::axis_local<double>(k));
+        Matrix3d delta_rotation[4];
+        for (int i = 0; i < 4; ++i) {
+            delta_rotation[i] = Matrix3d::zero();
+        }
+        for (int i = k; i < 4; ++i) {
+            delta_rotation[i] = chain.rotation[k] * axis_skew * transpose(chain.rotation[k]) *
+                                chain.rotation[i];
+        }
+        Vector3d delta_offset[4];
+        Vector3d delta_origin[4];
+        for (int i = 0; i < 4; ++i) {
+            delta_offset[i] = Vector3d::zero();
+            delta_origin[i] = Vector3d::zero();
+        }
+        for (int m = 1; m < 4; ++m) {
+            if (k < m) {
+                delta_offset[m] = delta_rotation[m - 1] * scalar_model.joint_offsets[m];
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            for (int m = 0; m <= i; ++m) {
+                delta_origin[i] = delta_origin[i] + delta_offset[m];
+            }
+        }
+        Vector3d delta_axis[4];
+        for (int j = 0; j < 4; ++j) {
+            delta_axis[j] = Vector3d::zero();
+        }
+        for (int j = 1; j < 4; ++j) {
+            delta_axis[j] = delta_rotation[j - 1] * detail::axis_local<double>(j);
+        }
+        Vector3d delta_com[4];
+        for (int i = 0; i < 4; ++i) {
+            delta_com[i] = delta_origin[i] + delta_rotation[i] * scalar_model.bodies[i].com;
+        }
+
+        Matrix4d delta_mass = Matrix4d::zero();
+        Vector4d delta_coupling = Vector4d::zero();
+        double delta_base_inertia = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            Matrix34d delta_velocity_jacobian = Matrix34d::zero();
+            Matrix34d delta_angular_jacobian = Matrix34d::zero();
+            for (int joint = 0; joint <= i; ++joint) {
+                const Vector3d column =
+                    detail::cross_product(delta_axis[joint],
+                                          chain.com[i] - chain.joint_origin[joint]) +
+                    detail::cross_product(chain.axis[joint], delta_com[i] - delta_origin[joint]);
+                for (int row = 0; row < 3; ++row) {
+                    delta_velocity_jacobian(row, joint) = column[row];
+                    delta_angular_jacobian(row, joint) = delta_axis[joint][row];
+                }
+            }
+            const Matrix3d delta_inertia_world =
+                delta_rotation[i] * scalar_model.bodies[i].inertia * transpose(chain.rotation[i]) +
+                chain.rotation[i] * scalar_model.bodies[i].inertia * transpose(delta_rotation[i]);
+            const Vector3d normal_cross_com = detail::cross_product(normal, chain.com[i]);
+            const Vector3d normal_cross_delta_com = detail::cross_product(normal, delta_com[i]);
+            delta_mass = delta_mass + scalar_model.bodies[i].mass *
+                                          (transpose(delta_velocity_jacobian) * velocity_jacobian[i] +
+                                           transpose(velocity_jacobian[i]) * delta_velocity_jacobian);
+            delta_mass = delta_mass +
+                         transpose(delta_angular_jacobian) * inertia_world[i] * angular_jacobian[i] +
+                         transpose(angular_jacobian[i]) * delta_inertia_world * angular_jacobian[i] +
+                         transpose(angular_jacobian[i]) * inertia_world[i] * delta_angular_jacobian;
+            delta_coupling = delta_coupling +
+                             scalar_model.bodies[i].mass *
+                                 (transpose(delta_velocity_jacobian) * normal_cross_com +
+                                  transpose(velocity_jacobian[i]) * normal_cross_delta_com) +
+                             transpose(delta_angular_jacobian) * inertia_world[i] * normal +
+                             transpose(angular_jacobian[i]) * delta_inertia_world * normal;
+            delta_base_inertia +=
+                2.0 * scalar_model.bodies[i].mass *
+                    detail::dot_product(normal_cross_com, normal_cross_delta_com) +
+                detail::dot_product(normal, delta_inertia_world * normal);
+        }
+        result.mass_derivative[k] = delta_mass;
+        result.coupling_derivative[k] = delta_coupling;
+        result.base_inertia_derivative[k] = delta_base_inertia;
     }
     return result;
 }

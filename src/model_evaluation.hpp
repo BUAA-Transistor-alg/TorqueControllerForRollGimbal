@@ -2,9 +2,9 @@
 
 // 内部：标量泛化的动力学求值。
 //
-// 所有物理量都转换成模板标量 Scalar：double 用于前向仿真；std::complex<double>
-// 用于单步闭式实现（dynamics_model.cpp）的复步长求导。仿真的梯度路径直接对
-// 本文件的求值过程做解析方向导数（见 stage_derivatives.cpp），不走复步长。
+// 所有物理量都写成模板标量 Scalar 的形式，前向仿真与闭式单步实现共用同一套
+// 求值代码。梯度路径对本文件的求值过程做解析方向导数（见 stage_derivatives.cpp），
+// 闭式单步实现的质量矩阵偏导同样用链的方向导数求值（见 dynamics_model.cpp）。
 //
 // 质量矩阵按 DYNAMICS.md 7.2 的雅可比形式组装；偏置力 b 按第 8 节的逆动力学
 // 递推形式计算（令 q̈ = 0）。递推形式只含四则运算与三角函数，对 q、q̇ 以及全部
@@ -12,7 +12,6 @@
 
 #include <array>
 #include <cmath>
-#include <complex>
 #include <stdexcept>
 #include <type_traits>
 
@@ -21,11 +20,6 @@
 
 namespace gimbal {
 namespace detail {
-
-using Complex = std::complex<double>;
-
-// 复步长的虚部增量。虚部按线性方式参与运算，不出现减法抵消。
-inline constexpr double kComplexStep = 1e-20;
 
 template <typename Scalar>
 using Vector3 = math::Vector<Scalar, 3>;
@@ -169,28 +163,6 @@ ScalarModelParameters<Scalar> convert_model(const ModelParameters& model) {
         result.damping[joint] = Scalar(model.damping[joint]);
     }
     result.gravity = Scalar(model.gravity);
-    return result;
-}
-
-// 标量泛化模型之间的转换（数值保持不变）
-template <typename ToScalar, typename FromScalar>
-ScalarModelParameters<ToScalar> convert_scalar_model(const ScalarModelParameters<FromScalar>& model) {
-    ScalarModelParameters<ToScalar> result;
-    for (int i = 0; i < 4; ++i) {
-        result.bodies[i].mass = ToScalar(model.bodies[i].mass);
-        for (int row = 0; row < 3; ++row) {
-            result.bodies[i].com[row] = ToScalar(model.bodies[i].com[row]);
-            result.joint_offsets[i][row] = ToScalar(model.joint_offsets[i][row]);
-            for (int column = 0; column < 3; ++column) {
-                result.bodies[i].inertia(row, column) =
-                    ToScalar(model.bodies[i].inertia(row, column));
-            }
-        }
-    }
-    for (int joint = 0; joint < 4; ++joint) {
-        result.damping[joint] = ToScalar(model.damping[joint]);
-    }
-    result.gravity = ToScalar(model.gravity);
     return result;
 }
 
@@ -373,12 +345,8 @@ Vector4<Scalar> evaluate_bias(const ScalarModelParameters<Scalar>& model,
     return bias;
 }
 
-// 求解 M q̈ = rhs。double 用 Cholesky；复数用实部 Cholesky 加一阶虚部修正。
+// 求解 M q̈ = rhs（Cholesky 分解）
 inline Vector4<double> solve_mass(const Matrix4<double>& mass, const Vector4<double>& rhs) {
-    return math::solve4(mass, rhs);
-}
-
-inline Vector4<Complex> solve_mass(const Matrix4<Complex>& mass, const Vector4<Complex>& rhs) {
     return math::solve4(mass, rhs);
 }
 
