@@ -158,6 +158,7 @@ void ThreadPool::parallel_for(
     if (count == 0) {
         return;
     }
+    std::lock_guard<std::mutex> execution_guard(execution_mutex_);
     const std::size_t participants = static_cast<std::size_t>(participant_count());
     const std::size_t chunk = (count + participants - 1) / participants;
     const std::size_t chunk_count = (count + chunk - 1) / chunk;
@@ -200,6 +201,7 @@ void ThreadPool::parallel_dynamic(
     if (count == 0) {
         return;
     }
+    std::lock_guard<std::mutex> execution_guard(execution_mutex_);
     if (worker_count() == 0) {
         for (std::size_t index = 0; index < count; ++index) {
             function(0, index);
@@ -236,6 +238,8 @@ void ThreadPool::parallel_dynamic(
 
 ThreadPool::Pipeline ThreadPool::start_pipeline(
     std::size_t count, const std::function<void(std::size_t)>& worker) {
+    // 同一线程池上的流水线与其他任务串行执行，避免 job_ 被并发覆盖
+    std::unique_lock<std::mutex> execution_lock(execution_mutex_);
     std::shared_ptr<Job> job(new Job());
     job->count = count;
     job->worker = worker;
@@ -248,6 +252,7 @@ ThreadPool::Pipeline ThreadPool::start_pipeline(
     Pipeline pipeline;
     pipeline.pool_ = this;
     pipeline.job_ = job;
+    pipeline.execution_lock_ = std::move(execution_lock);
     return pipeline;
 }
 
@@ -264,11 +269,8 @@ void ThreadPool::Pipeline::finish() {
             break;
         }
         if (job_->available.load(std::memory_order_acquire) <= current) {
-            if (job_->claimed.load(std::memory_order_relaxed) >= job_->count) {
-                break;
-            }
-            __builtin_ia32_pause();
-            continue;
+            // producer_done 已置位，不会再发布新任务，直接结束
+            break;
         }
         if (job_->claimed.compare_exchange_weak(current, current + 1)) {
             job_->worker(current);
@@ -283,6 +285,10 @@ void ThreadPool::Pipeline::finish() {
     {
         std::unique_lock<std::mutex> lock(pool_->mutex_);
         pool_->condition_.wait(lock, [&] { return job_->pending == 0; });
+    }
+    finished_ = true;
+    if (execution_lock_.owns_lock()) {
+        execution_lock_.unlock();
     }
 }
 

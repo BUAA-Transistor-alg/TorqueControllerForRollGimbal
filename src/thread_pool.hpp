@@ -49,6 +49,13 @@ public:
     class Pipeline {
     public:
         Pipeline() = default;
+        Pipeline(Pipeline&&) = default;
+        Pipeline& operator=(Pipeline&&) = default;
+        Pipeline(const Pipeline&) = delete;
+        Pipeline& operator=(const Pipeline&) = delete;
+        ~Pipeline() = default;
+
+        // 发布已写入数据的任务下标；finish 等待全部任务完成并释放执行权
         void publish(std::size_t index);
         void finish();
 
@@ -56,6 +63,8 @@ public:
         friend class ThreadPool;
         ThreadPool* pool_ = nullptr;
         std::shared_ptr<Job> job_;
+        std::unique_lock<std::mutex> execution_lock_;
+        bool finished_ = false;
     };
 
     Pipeline start_pipeline(std::size_t count, const std::function<void(std::size_t)>& worker);
@@ -64,6 +73,7 @@ private:
     void worker_loop(int worker_index);
 
     std::vector<std::thread> workers_;
+    std::mutex execution_mutex_;  // 同一线程池上的任务互相串行
     std::mutex mutex_;
     std::condition_variable condition_;
     std::shared_ptr<Job> job_;
