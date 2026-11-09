@@ -14,18 +14,16 @@
 namespace gimbal {
 namespace detail {
 
+// 只保留导数路径实际读取的字段：前向阶段的解与偏置力中间量；
+// 质量矩阵、偏置力与右端项按局部变量参与求解，不再保存。
 struct StageData {
     BaseState base;
     math::Vector4d angle;
     math::Vector4d qdot;
-    math::Vector4d torque;
     Chain<Real> chain;
     MassInternals<Real> mass_internals;
     BiasInternals<Real> bias_internals;
-    math::Matrix4d mass;
     math::Cholesky4 factor;
-    math::Vector4d bias;
-    math::Vector4d right_hand_side;
     math::Vector4d acceleration;
 };
 

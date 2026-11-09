@@ -47,6 +47,73 @@ inline simulation::State unpack_state(const math::Vector8d& state) {
     return result;
 }
 
+// 纯前向仿真：不构造阶段中间量结构，只求加速度并记录轨迹
+inline Real simulate_forward(const ModelParameters& model, const Terrain& terrain,
+                             const simulation::State& initial, const BaseState* base,
+                             const math::Vector4d* torque, std::size_t num_steps,
+                             const simulation::TrajectorySpec& spec,
+                             const simulation::LossSpec& loss, simulation::Trace& trace) {
+    simulation::validate(spec, num_steps);
+    if (base == nullptr) {
+        throw std::invalid_argument("base 不能为空");
+    }
+    if (torque == nullptr) {
+        throw std::invalid_argument("torque 不能为空");
+    }
+    trace.resize(num_steps, spec.refinement);
+    const ScalarModelParameters<Real> scalar_model = convert_model<Real>(model);
+    const TerrainFrame<Real> terrain_frame =
+        evaluate_terrain_frame(convert_terrain<Real>(terrain));
+    const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
+    const Real h = spec.step / static_cast<Real>(spec.refinement);
+    math::Vector8d state = pack_state(initial);
+    Real total_loss = 0.0;
+
+    for (std::size_t k = 0; k < num_steps; ++k) {
+        const math::Vector4d torque_k = torque[k];
+        for (std::size_t s = 0; s < refinement; ++s) {
+            const Real substep_time = static_cast<Real>(s) * h;
+            const BaseState stage_input[4] = {
+                advance_base(base[k], substep_time),
+                advance_base(base[k], substep_time + 0.5 * h),
+                advance_base(base[k], substep_time + 0.5 * h),
+                advance_base(base[k], substep_time + h),
+            };
+            math::Vector8d stage_state[4];
+            math::Vector8d stage_derivative[4];
+            stage_state[0] = state;
+            for (int t = 0; t < 4; ++t) {
+                if (t > 0) {
+                    const Real advance = (t == 3) ? h : 0.5 * h;
+                    stage_state[t] = stage_state[0] + stage_derivative[t - 1] * advance;
+                }
+                math::Vector4d angle;
+                math::Vector4d velocity;
+                for (int i = 0; i < 4; ++i) {
+                    angle[i] = stage_state[t][i];
+                    velocity[i] = stage_state[t][4 + i];
+                }
+                const math::Vector4d acceleration = evaluate_acceleration<Real>(
+                    scalar_model, terrain_frame, stage_input[t], angle, velocity, torque_k);
+                for (int i = 0; i < 4; ++i) {
+                    stage_derivative[t][i] = stage_state[t][4 + i];
+                    stage_derivative[t][4 + i] = acceleration[i];
+                }
+                const std::size_t stage_index =
+                    (k * refinement + s) * 4 + static_cast<std::size_t>(t);
+                trace.stage_state[stage_index] = unpack_state(stage_state[t]);
+                trace.stage_base[stage_index] = stage_input[t];
+            }
+            state = stage_state[0] + (stage_derivative[0] + stage_derivative[1] * 2.0 +
+                                      stage_derivative[2] * 2.0 + stage_derivative[3]) *
+                                         (h / 6.0);
+        }
+        trace.step_end[k] = unpack_state(state);
+        total_loss += simulation::step_loss(loss, num_steps, k, trace.step_end[k], torque_k);
+    }
+    return total_loss;
+}
+
 // 阶段回调签名：void(std::size_t stage_index, const StageData& data)
 // 主步回调签名：void(std::size_t step_index, const simulation::State& step_end_state)
 // stage_buffer 非空时阶段中间量就地写入该缓冲区，供流水线并行处理。

@@ -12,17 +12,16 @@ void evaluate_stage_data(const ScalarModelParameters<Real>& model,
     out.base = base;
     out.angle = state.angle;
     out.qdot = state.velocity;
-    out.torque = torque;
     out.chain = evaluate_chain(model, frame, base, out.angle);
-    out.mass = evaluate_mass_matrix(model, out.chain, &out.mass_internals);
-    out.bias = evaluate_bias(model, out.chain, base, out.qdot, &out.bias_internals,
-                             &out.mass_internals);
-    out.right_hand_side = torque - elementwise(model.damping, out.qdot) - out.bias;
-    out.factor.factorize(out.mass);
+    const math::Matrix4d mass = evaluate_mass_matrix(model, out.chain, &out.mass_internals);
+    const math::Vector4d bias =
+        evaluate_bias(model, out.chain, base, out.qdot, &out.bias_internals, &out.mass_internals);
+    const math::Vector4d right_hand_side = torque - elementwise(model.damping, out.qdot) - bias;
+    out.factor.factorize(mass);
     if (!out.factor.valid) {
         throw std::runtime_error("惯量矩阵不是正定矩阵");
     }
-    out.acceleration = out.factor.solve(out.right_hand_side);
+    out.acceleration = out.factor.solve(right_hand_side);
 }
 
 }  // namespace detail

@@ -281,7 +281,6 @@ template <typename Scalar>
 struct BiasInternals {
     std::array<Vector3<Scalar>, 4> omega;
     std::array<Vector3<Scalar>, 4> alpha;
-    std::array<Vector3<Scalar>, 4> origin_acceleration;
     std::array<Vector3<Scalar>, 4> com_acceleration;
     std::array<Vector3<Scalar>, 4> force;
     std::array<Vector3<Scalar>, 4> couple;
@@ -326,7 +325,6 @@ Vector4<Scalar> evaluate_bias(const ScalarModelParameters<Scalar>& model,
             cross_product(angular_velocity, cross_product(angular_velocity, com_relative));
         data.omega[i] = angular_velocity;
         data.alpha[i] = angular_acceleration;
-        data.origin_acceleration[i] = origin_acceleration;
         data.com_acceleration[i] = linear_acceleration;
         previous_omega = angular_velocity;
         previous_alpha = angular_acceleration;
@@ -368,6 +366,22 @@ Vector4<Scalar> evaluate_bias(const ScalarModelParameters<Scalar>& model,
 // 求解 M q̈ = rhs（Cholesky 分解）
 inline Vector4<Real> solve_mass(const Matrix4<Real>& mass, const Vector4<Real>& rhs) {
     return math::solve4(mass, rhs);
+}
+
+// 只求单阶段加速度，供纯前向仿真使用（不写阶段中间量结构）
+template <typename Scalar>
+Vector4<Scalar> evaluate_acceleration(const ScalarModelParameters<Scalar>& model,
+                                      const TerrainFrame<Scalar>& frame, const BaseState& base,
+                                      const Vector4<Scalar>& q, const Vector4<Scalar>& qdot,
+                                      const Vector4<Scalar>& torque) {
+    const Chain<Scalar> chain = evaluate_chain(model, frame, base, q);
+    MassInternals<Scalar> internals;
+    const Matrix4<Scalar> mass = evaluate_mass_matrix(model, chain, &internals);
+    const Vector4<Scalar> bias = evaluate_bias(model, chain, base, qdot,
+                                               static_cast<BiasInternals<Scalar>*>(nullptr),
+                                               &internals);
+    const Vector4<Scalar> right_hand_side = torque - elementwise(model.damping, qdot) - bias;
+    return solve_mass(mass, right_hand_side);
 }
 
 // 状态导数 y' = f(y, u)，y = [q; q̇]，u = τ
