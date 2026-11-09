@@ -298,15 +298,11 @@ KinematicsBatch<N> propagate_kinematics(const StageData& stage, const SeedBatch<
 
         // axis_direction = δa_i q̇_i + a_i δq̇_i
         Real axis_direction[3][N];
-        {
-            const Vector3d axis_velocity = axis * velocity;
-            for (int component = 0; component < 3; ++component) {
-                for (int d = 0; d < N; ++d) {
-                    axis_direction[component][d] =
-                        seed.axis[i][component][d] * velocity + axis[component] * seed.velocity[i][d];
-                }
+        for (int component = 0; component < 3; ++component) {
+            for (int d = 0; d < N; ++d) {
+                axis_direction[component][d] =
+                    seed.axis[i][component][d] * velocity + axis[component] * seed.velocity[i][d];
             }
-            (void)axis_velocity;
         }
         // δω_i = δω_{i-1} + axis_direction
         for (int component = 0; component < 3; ++component) {

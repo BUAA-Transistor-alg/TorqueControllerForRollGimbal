@@ -137,7 +137,8 @@ void run_single(const Problem& problem) {
                     kNumSteps, problem.spec, problem.loss, workspace, &gradient, &state);
                 for (std::size_t k = 0; k < kNumSteps; ++k) {
                     for (int i = 0; i < 4; ++i) {
-                        torque[k][i] += 1e-8 * gradient[10 + i];
+                        // 参数灵敏度与力矩不同量纲，这里只制造小的固定扰动
+                        torque[k][i] += 1e-8 * static_cast<Real>(i + 1);
                     }
                 }
             }));
@@ -224,8 +225,9 @@ void run_batch(const Problem& problem, std::size_t batch) {
                     initial[s] = final_state[s];
                     for (std::size_t k = 0; k < kNumSteps; ++k) {
                         for (int i = 0; i < 4; ++i) {
+                            // 参数灵敏度与力矩不同量纲，这里只制造小的固定扰动
                             torque[s * kNumSteps + k][i] +=
-                                1e-8 * gradients[s][10 + i];
+                                1e-8 * static_cast<Real>(i + 1);
                         }
                     }
                 }

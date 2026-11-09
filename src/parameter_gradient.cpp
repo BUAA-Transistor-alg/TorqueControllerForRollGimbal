@@ -1,5 +1,6 @@
 #include "gimbal_dynamics/parameter_gradient.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <stdexcept>
@@ -65,7 +66,7 @@ Real simulateAndSensitivitySerial(const ModelParameters& model, const Terrain& t
                  simulation::step_loss_gradient(loss, num_steps, k, step_end_state);
     };
     const Real loss_value = detail::simulate_trajectory(
-        model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace, false,
+        model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace, true,
         nullptr, stage_visitor, step_visitor);
     if (final_state != nullptr) {
         *final_state = workspace.trace.step_end.back();
@@ -138,9 +139,15 @@ Real simulateAndSensitivityThreaded(const ModelParameters& model, const Terrain&
         }
     };
     const auto step_visitor = [](std::size_t, const simulation::State&) {};
-    const Real loss_value = detail::simulate_trajectory_inputs(
-        model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace,
-        stage_inputs, stage_visitor, step_visitor);
+    Real loss_value;
+    try {
+        loss_value = detail::simulate_trajectory_inputs(
+            model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace,
+            stage_inputs, stage_visitor, step_visitor);
+    } catch (...) {
+        pipeline.abort();
+        throw;
+    }
 
     // 子步按顺序就绪后立即推进灵敏度，与剩余工作线程的计算重叠
     math::Matrix<Real, 8, parameters::kParameterCount> sensitivity =
@@ -217,8 +224,12 @@ Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& te
     if (initial == nullptr || base == nullptr || torque == nullptr || loss == nullptr) {
         throw std::invalid_argument("批量输入不能为空");
     }
+    simulation::validate(spec, num_steps);
     workspace.resize(batch);
     std::vector<Real> loss_values(batch);
+    const std::size_t participants =
+        static_cast<std::size_t>(detail::ThreadPool::batch_pool().participant_count());
+    const std::size_t chunk = std::max<std::size_t>(1, batch / participants);
     detail::ThreadPool::batch_pool().parallel_dynamic(
         batch, [&](int participant, std::size_t sample) {
             Workspace& work = workspace.workspaces[static_cast<std::size_t>(participant)];
@@ -227,7 +238,8 @@ Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& te
                 model, terrain, initial[sample], base + offset, torque + offset, num_steps, spec,
                 loss[sample], work, (gradient != nullptr) ? gradient + sample : nullptr,
                 (final_state != nullptr) ? final_state + sample : nullptr);
-        }, 2);
+        },
+        chunk);
     Real total = Real(0);
     for (std::size_t sample = 0; sample < batch; ++sample) {
         total += loss_values[sample];

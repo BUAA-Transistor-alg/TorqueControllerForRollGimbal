@@ -3,7 +3,7 @@
 // 定步长前向仿真核心：4 个关节的 8 维状态、RK4 细化积分、标量轨迹损失。
 //
 // 对控制量求梯度的模块（gimbal::control_gradient）与对模型参数求灵敏度的模块
-// （gimbal::parameter_gradient）都调用本文件的 simulate() 完成前向计算，
+// （gimbal::parameter_gradient）共用同一套内部前向积分循环（src/simulation_core.hpp），
 // 因此两者的前向轨迹、阶段状态与损失逐位一致。
 
 #include <cstddef>
@@ -51,7 +51,8 @@ struct Trace {
     void release();
 };
 
-// 配置校验。step <= 0 或 refinement < 1 时抛出 std::invalid_argument。
+// 配置校验。step 非正或非有限、refinement < 1、num_steps < 1、尺寸溢出时
+// 抛出 std::invalid_argument。
 void validate(const TrajectorySpec& spec, std::size_t num_steps);
 
 // 单步状态导数 y' = f(y, u)，y = [q; q̇]，u = τ。用于与 forward_dynamics 对照。

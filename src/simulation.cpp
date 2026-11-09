@@ -1,5 +1,7 @@
 #include "gimbal_dynamics/simulation.hpp"
 
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 
 #include "model_evaluation.hpp"
@@ -26,14 +28,19 @@ void Trace::release() {
 }
 
 void validate(const TrajectorySpec& spec, std::size_t num_steps) {
-    if (!(spec.step > 0.0)) {
-        throw std::invalid_argument("主步长必须大于 0");
+    if (!(spec.step > 0.0) || !std::isfinite(spec.step)) {
+        throw std::invalid_argument("主步长必须是大于 0 的有限值");
     }
     if (spec.refinement < 1) {
         throw std::invalid_argument("细化倍数必须大于等于 1");
     }
     if (num_steps < 1) {
         throw std::invalid_argument("步数必须大于等于 1");
+    }
+    const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
+    if (refinement > std::numeric_limits<std::size_t>::max() / 4 ||
+        num_steps > std::numeric_limits<std::size_t>::max() / (4 * refinement)) {
+        throw std::invalid_argument("步数与细化倍数过大，缓冲区尺寸溢出");
     }
 }
 

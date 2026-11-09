@@ -1,15 +1,19 @@
 #pragma once
 
-// 内部：固定大小线程池。
+// 内部：常驻线程池。
 //
 // 两种用法：
-//   parallel_for：按参与者编号静态分块执行（主线程是 0 号参与者）；
-//   start_pipeline：主线程发布任务、工作线程领取处理，用于前向仿真与
-//   阶段 Jacobian 的流水线重叠。
+//   parallel_dynamic：按参与者动态领取任务（批量样本级并行）；
+//   start_pipeline：生产者发布任务、工作线程领取处理（单样本前向与阶段 Jacobian 重叠）。
+//
+// 同一线程池上的任务通过内部互斥量串行执行；任务体抛出的异常会被捕获并保存，
+// 在等待全部参与者退出后由调用线程重新抛出。Pipeline 的析构会中止未完成的任务，
+// 避免异常路径留下自旋的工作线程。
 
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -21,7 +25,6 @@ namespace detail {
 
 class ThreadPool {
 public:
-    // 任务载体，由线程池内部创建与回收
     struct Job;
 
     explicit ThreadPool(int worker_count);
@@ -38,11 +41,7 @@ public:
     // 批量调用用的线程池（全部工作线程，样本级并行）
     static ThreadPool& batch_pool();
 
-    void parallel_for(std::size_t count,
-                      const std::function<void(int participant, std::size_t begin,
-                                               std::size_t end)>& function);
-
-    // 动态领取：每个参与者按需领取一段下标，适合任务代价相近但核心异构的场景
+    // 动态领取一段连续下标；chunk 控制每次领取的个数
     void parallel_dynamic(std::size_t count,
                           const std::function<void(int participant, std::size_t index)>& function,
                           std::size_t chunk = 1);
@@ -54,11 +53,14 @@ public:
         Pipeline& operator=(Pipeline&&) = default;
         Pipeline(const Pipeline&) = delete;
         Pipeline& operator=(const Pipeline&) = delete;
-        ~Pipeline() = default;
+        ~Pipeline();
 
-        // 发布已写入数据的任务下标；finish 等待全部任务完成并释放执行权
+        // 发布已写入数据的任务下标
         void publish(std::size_t index);
+        // 等待全部任务完成；任务体异常时在此重新抛出
         void finish();
+        // 中止未完成的任务并等待工作线程退出（析构会自动调用）
+        void abort() noexcept;
 
     private:
         friend class ThreadPool;
@@ -72,6 +74,7 @@ public:
 
 private:
     void worker_loop(int worker_index);
+    void record_error(Job& job) noexcept;
 
     std::vector<std::thread> workers_;
     std::mutex execution_mutex_;  // 同一线程池上的任务互相串行

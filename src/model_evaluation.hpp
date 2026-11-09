@@ -145,6 +145,54 @@ struct ScalarModelParameters {
     Scalar gravity = Scalar(0);
 };
 
+// 模型参数合法性：质量与阻尼非负、惯量对称正定、所有量有限
+template <typename Scalar>
+void validate_model_parameters(const ScalarModelParameters<Scalar>& model) {
+    const Scalar tolerance = std::is_same<Real, float>::value ? Scalar(1e-5) : Scalar(1e-9);
+    auto finite = [](const Scalar& value) { return std::isfinite(value); };
+    for (int i = 0; i < 4; ++i) {
+        if (!finite(model.bodies[i].mass) || model.bodies[i].mass < Scalar(0)) {
+            throw std::invalid_argument("刚体质量必须是非负有限值");
+        }
+        for (int row = 0; row < 3; ++row) {
+            if (!finite(model.bodies[i].com[row]) || !finite(model.joint_offsets[i][row])) {
+                throw std::invalid_argument("质心或关节安装偏置包含非有限值");
+            }
+        }
+        const Matrix3<Scalar>& inertia = model.bodies[i].inertia;
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                if (!finite(inertia(row, column))) {
+                    throw std::invalid_argument("惯量矩阵包含非有限值");
+                }
+                if (std::fabs(inertia(row, column) - inertia(column, row)) >
+                    tolerance * (Scalar(1) + std::fabs(inertia(row, column)))) {
+                    throw std::invalid_argument("惯量矩阵必须对称");
+                }
+            }
+        }
+        const Scalar a = inertia(0, 0);
+        const Scalar b = inertia(0, 1);
+        const Scalar c = inertia(1, 1);
+        const Scalar second_minor = a * c - b * b;
+        const Scalar determinant = a * (inertia(1, 1) * inertia(2, 2) - inertia(1, 2) * inertia(2, 1)) -
+                                   b * (inertia(1, 0) * inertia(2, 2) - inertia(1, 2) * inertia(2, 0)) +
+                                   inertia(0, 2) *
+                                       (inertia(1, 0) * inertia(2, 1) - inertia(1, 1) * inertia(2, 0));
+        if (!(a > Scalar(0)) || !(second_minor > Scalar(0)) || !(determinant > Scalar(0))) {
+            throw std::invalid_argument("惯量矩阵必须正定");
+        }
+    }
+    for (int joint = 0; joint < 4; ++joint) {
+        if (!finite(model.damping[joint]) || model.damping[joint] < Scalar(0)) {
+            throw std::invalid_argument("粘性阻尼必须是非负有限值");
+        }
+    }
+    if (!finite(model.gravity)) {
+        throw std::invalid_argument("重力加速度包含非有限值");
+    }
+}
+
 template <typename Scalar>
 ScalarModelParameters<Scalar> convert_model(const ModelParameters& model) {
     ScalarModelParameters<Scalar> result;
@@ -163,6 +211,7 @@ ScalarModelParameters<Scalar> convert_model(const ModelParameters& model) {
         result.damping[joint] = Scalar(model.damping[joint]);
     }
     result.gravity = Scalar(model.gravity);
+    validate_model_parameters(result);
     return result;
 }
 
@@ -174,6 +223,9 @@ struct ScalarTerrain {
 
 template <typename Scalar>
 ScalarTerrain<Scalar> convert_terrain(const Terrain& terrain) {
+    if (!std::isfinite(terrain.slope_angle) || !std::isfinite(terrain.slope_direction)) {
+        throw std::invalid_argument("地形参数包含非有限值");
+    }
     ScalarTerrain<Scalar> result;
     result.slope_angle = Scalar(terrain.slope_angle);
     result.slope_direction = Scalar(terrain.slope_direction);

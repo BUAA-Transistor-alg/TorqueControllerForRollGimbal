@@ -11,7 +11,6 @@ namespace detail {
 // 高频读写的原子量各自独占缓存行，避免生产者与工作线程的伪共享
 struct ThreadPool::Job {
     std::size_t count = 0;
-    std::function<void(int, std::size_t, std::size_t)> parallel;
     std::function<void(int, std::size_t)> dynamic;
     std::function<void(std::size_t)> worker;
     alignas(64) std::atomic<std::size_t> available{0};
@@ -19,6 +18,8 @@ struct ThreadPool::Job {
     alignas(64) std::atomic<std::size_t> next{0};
     std::size_t dynamic_chunk = 1;
     alignas(64) std::atomic<bool> producer_done{false};
+    alignas(64) std::atomic<bool> aborted{false};
+    std::exception_ptr error;  // 由线程池互斥量保护
     alignas(64) int pending = 0;
 };
 
@@ -29,21 +30,23 @@ int hardware_threads() {
     return hardware > 1 ? static_cast<int>(hardware) - 1 : 0;
 }
 
+// 未设置或非法返回 -1；合法值 n 表示总线程数，返回工作线程数 n-1
 int environment_threads(const char* name) {
-    const char* environment = std::getenv(name);
-    if (environment == nullptr) {
-        return 0;
+    const char* text = std::getenv(name);
+    if (text == nullptr) {
+        return -1;
     }
-    const int requested = std::atoi(environment);
-    if (requested < 1) {
-        return 0;
+    char* end = nullptr;
+    const long value = std::strtol(text, &end, 10);
+    if (end == text || *end != '\0' || value < 1 || value > 4096) {
+        return -1;
     }
-    return requested - 1;  // 返回工作线程数：总线程数含调用线程
+    return static_cast<int>(value) - 1;
 }
 
 int pipeline_worker_count() {
     const int configured = environment_threads("GIMBAL_PIPELINE_THREADS");
-    if (configured > 0) {
+    if (configured >= 0) {
         return configured;
     }
     const int available = hardware_threads();
@@ -53,7 +56,7 @@ int pipeline_worker_count() {
 
 int batch_worker_count() {
     const int configured = environment_threads("GIMBAL_BATCH_THREADS");
-    if (configured > 0) {
+    if (configured >= 0) {
         return configured;
     }
     return hardware_threads();
@@ -62,8 +65,9 @@ int batch_worker_count() {
 }  // namespace
 
 ThreadPool::ThreadPool(int worker_count) {
-    workers_.reserve(static_cast<std::size_t>(worker_count < 0 ? 0 : worker_count));
-    for (int i = 0; i < worker_count; ++i) {
+    const int count = worker_count < 0 ? 0 : std::min(worker_count, 4096);
+    workers_.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
         workers_.emplace_back([this, i] { worker_loop(i); });
     }
 }
@@ -91,6 +95,17 @@ ThreadPool& ThreadPool::batch_pool() {
     return instance;
 }
 
+void ThreadPool::record_error(Job& job) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!job.error) {
+            job.error = std::current_exception();
+        }
+        job.aborted.store(true, std::memory_order_release);
+    } catch (...) {
+    }
+}
+
 void ThreadPool::worker_loop(int worker_index) {
     std::shared_ptr<Job> last;
     for (;;) {
@@ -106,49 +121,48 @@ void ThreadPool::worker_loop(int worker_index) {
             job = job_;
             last = job;
         }
-        if (job->dynamic) {
-            for (;;) {
-                const std::size_t base =
-                    job->next.fetch_add(job->dynamic_chunk, std::memory_order_relaxed);
-                if (base >= job->count) {
-                    break;
-                }
-                const std::size_t end = std::min(job->count, base + job->dynamic_chunk);
-                for (std::size_t index = base; index < end; ++index) {
-                    job->dynamic(worker_index + 1, index);
-                }
-            }
-        } else if (job->worker) {
-            for (;;) {
-                std::size_t current = job->claimed.load(std::memory_order_relaxed);
-                if (current >= job->count) {
-                    break;
-                }
-                if (job->available.load(std::memory_order_acquire) <= current) {
-                    if (job->producer_done.load(std::memory_order_acquire)) {
+        try {
+            if (job->dynamic) {
+                for (;;) {
+                    if (job->aborted.load(std::memory_order_acquire)) {
                         break;
                     }
-#if defined(__x86_64__) || defined(__i386__)
-                    __builtin_ia32_pause();
-#else
-                    std::this_thread::yield();
-#endif
-                    continue;
+                    const std::size_t base =
+                        job->next.fetch_add(job->dynamic_chunk, std::memory_order_relaxed);
+                    if (base >= job->count) {
+                        break;
+                    }
+                    const std::size_t end = std::min(job->count, base + job->dynamic_chunk);
+                    for (std::size_t index = base; index < end; ++index) {
+                        if (job->aborted.load(std::memory_order_acquire)) {
+                            break;
+                        }
+                        job->dynamic(worker_index + 1, index);
+                    }
                 }
-                if (job->claimed.compare_exchange_weak(current, current + 1)) {
-                    job->worker(current);
+            } else if (job->worker) {
+                for (;;) {
+                    if (job->aborted.load(std::memory_order_acquire)) {
+                        break;
+                    }
+                    std::size_t current = job->claimed.load(std::memory_order_relaxed);
+                    if (current >= job->count) {
+                        break;
+                    }
+                    if (job->available.load(std::memory_order_acquire) <= current) {
+                        if (job->producer_done.load(std::memory_order_acquire)) {
+                            break;
+                        }
+                        __builtin_ia32_pause();
+                        continue;
+                    }
+                    if (job->claimed.compare_exchange_weak(current, current + 1)) {
+                        job->worker(current);
+                    }
                 }
             }
-        } else {
-            const std::size_t participants = static_cast<std::size_t>(participant_count());
-            const std::size_t chunk = (job->count + participants - 1) / participants;
-            const std::size_t chunk_count = (job->count + chunk - 1) / chunk;
-            for (std::size_t c = static_cast<std::size_t>(worker_index) + 1; c < chunk_count;
-                 c += participants) {
-                const std::size_t begin = c * chunk;
-                const std::size_t end = std::min(job->count, begin + chunk);
-                job->parallel(static_cast<int>(worker_index) + 1, begin, end);
-            }
+        } catch (...) {
+            record_error(*job);
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -156,49 +170,6 @@ void ThreadPool::worker_loop(int worker_index) {
                 condition_.notify_all();
             }
         }
-    }
-}
-
-void ThreadPool::parallel_for(
-    std::size_t count, const std::function<void(int, std::size_t, std::size_t)>& function) {
-    if (count == 0) {
-        return;
-    }
-    std::lock_guard<std::mutex> execution_guard(execution_mutex_);
-    const std::size_t participants = static_cast<std::size_t>(participant_count());
-    const std::size_t chunk = (count + participants - 1) / participants;
-    const std::size_t chunk_count = (count + chunk - 1) / chunk;
-    if (worker_count() == 0) {
-        for (std::size_t c = 0; c < chunk_count; ++c) {
-            const std::size_t begin = c * chunk;
-            const std::size_t end = std::min(count, begin + chunk);
-            function(0, begin, end);
-        }
-        return;
-    }
-    std::shared_ptr<Job> job(new Job());
-    job->count = count;
-    job->parallel = function;
-    job->pending = participant_count();
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        job_ = job;
-    }
-    condition_.notify_all();
-    for (std::size_t c = 0; c < chunk_count; c += participants) {
-        const std::size_t begin = c * chunk;
-        const std::size_t end = std::min(count, begin + chunk);
-        function(0, begin, end);
-    }
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (--job->pending == 0) {
-            condition_.notify_all();
-        }
-    }
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait(lock, [&] { return job->pending == 0; });
     }
 }
 
@@ -213,8 +184,16 @@ void ThreadPool::parallel_dynamic(
     }
     std::lock_guard<std::mutex> execution_guard(execution_mutex_);
     if (worker_count() == 0) {
-        for (std::size_t index = 0; index < count; ++index) {
-            function(0, index);
+        std::atomic<std::size_t> next{0};
+        for (;;) {
+            const std::size_t base = next.fetch_add(chunk, std::memory_order_relaxed);
+            if (base >= count) {
+                break;
+            }
+            const std::size_t end = std::min(count, base + chunk);
+            for (std::size_t index = base; index < end; ++index) {
+                function(0, index);
+            }
         }
         return;
     }
@@ -228,15 +207,25 @@ void ThreadPool::parallel_dynamic(
         job_ = job;
     }
     condition_.notify_all();
-    for (;;) {
-        const std::size_t base = job->next.fetch_add(chunk, std::memory_order_relaxed);
-        if (base >= count) {
-            break;
+    try {
+        for (;;) {
+            if (job->aborted.load(std::memory_order_acquire)) {
+                break;
+            }
+            const std::size_t base = job->next.fetch_add(chunk, std::memory_order_relaxed);
+            if (base >= count) {
+                break;
+            }
+            const std::size_t end = std::min(count, base + chunk);
+            for (std::size_t index = base; index < end; ++index) {
+                if (job->aborted.load(std::memory_order_acquire)) {
+                    break;
+                }
+                function(0, index);
+            }
         }
-        const std::size_t end = std::min(count, base + chunk);
-        for (std::size_t index = base; index < end; ++index) {
-            function(0, index);
-        }
+    } catch (...) {
+        record_error(*job);
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -247,6 +236,14 @@ void ThreadPool::parallel_dynamic(
     {
         std::unique_lock<std::mutex> lock(mutex_);
         condition_.wait(lock, [&] { return job->pending == 0; });
+    }
+    std::exception_ptr error;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        error = job->error;
+    }
+    if (error) {
+        std::rethrow_exception(error);
     }
 }
 
@@ -270,24 +267,67 @@ ThreadPool::Pipeline ThreadPool::start_pipeline(
     return pipeline;
 }
 
+ThreadPool::Pipeline::~Pipeline() {
+    if (!finished_ && job_ != nullptr) {
+        abort();
+    }
+}
+
 void ThreadPool::Pipeline::publish(std::size_t index) {
+    if (!job_ || finished_) {
+        throw std::logic_error("流水线已结束，不能再发布任务");
+    }
     job_->available.store(index + 1, std::memory_order_release);
 }
 
+void ThreadPool::Pipeline::abort() noexcept {
+    if (!job_ || finished_) {
+        return;
+    }
+    try {
+        job_->aborted.store(true, std::memory_order_release);
+        job_->producer_done.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(pool_->mutex_);
+            if (--job_->pending == 0) {
+                pool_->condition_.notify_all();
+            }
+        }
+        {
+            std::unique_lock<std::mutex> lock(pool_->mutex_);
+            pool_->condition_.wait(lock, [&] { return job_->pending == 0; });
+        }
+    } catch (...) {
+    }
+    finished_ = true;
+    if (execution_lock_.owns_lock()) {
+        execution_lock_.unlock();
+    }
+}
+
 void ThreadPool::Pipeline::finish() {
+    if (finished_) {
+        return;
+    }
     job_->producer_done.store(true, std::memory_order_release);
-    // 生产者结束后调用线程继续领取剩余任务，避免只等不干活
     for (;;) {
+        if (job_->aborted.load(std::memory_order_acquire)) {
+            break;
+        }
         std::size_t current = job_->claimed.load(std::memory_order_relaxed);
         if (current >= job_->count) {
             break;
         }
         if (job_->available.load(std::memory_order_acquire) <= current) {
-            // producer_done 已置位，不会再发布新任务，直接结束
-            break;
+            break;  // producer_done 已置位，不会再有新任务
         }
         if (job_->claimed.compare_exchange_weak(current, current + 1)) {
-            job_->worker(current);
+            try {
+                job_->worker(current);
+            } catch (...) {
+                pool_->record_error(*job_);
+                break;
+            }
         }
     }
     {
@@ -300,11 +340,19 @@ void ThreadPool::Pipeline::finish() {
         std::unique_lock<std::mutex> lock(pool_->mutex_);
         pool_->condition_.wait(lock, [&] { return job_->pending == 0; });
     }
+    std::exception_ptr error;
+    {
+        std::lock_guard<std::mutex> lock(pool_->mutex_);
+        error = job_->error;
+    }
     const std::size_t published = job_->available.load(std::memory_order_acquire);
     const std::size_t count = job_->count;
     finished_ = true;
     if (execution_lock_.owns_lock()) {
         execution_lock_.unlock();
+    }
+    if (error) {
+        std::rethrow_exception(error);
     }
     if (published < count) {
         throw std::runtime_error("流水线任务未全部发布");
