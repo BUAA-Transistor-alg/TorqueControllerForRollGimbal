@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(RollGimbalDynamics LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -14,9 +16,11 @@ add_library(gimbal_dynamics STATIC
     src/stage_jacobians.cpp
     src/control_gradient.cpp
     src/parameter_gradient.cpp
+    src/thread_pool.cpp
 )
 target_include_directories(gimbal_dynamics PUBLIC include PRIVATE src)
 target_compile_options(gimbal_dynamics PRIVATE -Wall -Wextra)
+target_link_libraries(gimbal_dynamics PUBLIC Threads::Threads)
 
 # 精度开关：默认 double；打开后内部计算改用 float，仅用于精度对照测量
 option(GIMBAL_REAL_FLOAT "内部计算精度切换为 float（仅用于精度对照测量）" OFF)

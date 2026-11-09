@@ -49,14 +49,15 @@ inline simulation::State unpack_state(const math::Vector8d& state) {
 
 // 阶段回调签名：void(std::size_t stage_index, const StageData& data)
 // 主步回调签名：void(std::size_t step_index, const simulation::State& step_end_state)
+// stage_buffer 非空时阶段中间量就地写入该缓冲区，供流水线并行处理。
 template <typename StageVisitor, typename StepVisitor>
 Real simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
-                           const simulation::State& initial, const BaseState* base,
-                           const math::Vector4d* torque, std::size_t num_steps,
-                           const simulation::TrajectorySpec& spec,
-                           const simulation::LossSpec& loss, simulation::Trace& trace,
-                           bool record_stages, StageVisitor&& stage_visitor,
-                           StepVisitor&& step_visitor) {
+                         const simulation::State& initial, const BaseState* base,
+                         const math::Vector4d* torque, std::size_t num_steps,
+                         const simulation::TrajectorySpec& spec,
+                         const simulation::LossSpec& loss, simulation::Trace& trace,
+                         bool record_stages, StageData* stage_buffer,
+                         StageVisitor&& stage_visitor, StepVisitor&& step_visitor) {
     simulation::validate(spec, num_steps);
     if (base == nullptr) {
         throw std::invalid_argument("base 不能为空");
@@ -72,7 +73,7 @@ Real simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
     const Real h = spec.step / static_cast<Real>(spec.refinement);
     math::Vector8d state = pack_state(initial);
     Real total_loss = 0.0;
-    StageData data;
+    StageData local_data;
 
     for (std::size_t k = 0; k < num_steps; ++k) {
         const math::Vector4d torque_k = torque[k];
@@ -92,13 +93,16 @@ Real simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
                     const Real advance = (t == 3) ? h : 0.5 * h;
                     stage_state[t] = stage_state[0] + stage_derivative[t - 1] * advance;
                 }
+                const std::size_t stage_index =
+                    (k * refinement + s) * 4 + static_cast<std::size_t>(t);
+                StageData& data =
+                    (stage_buffer != nullptr) ? stage_buffer[stage_index] : local_data;
                 evaluate_stage_data(scalar_model, terrain_frame, stage_input[t],
                                     unpack_state(stage_state[t]), torque_k, data);
                 for (int i = 0; i < 4; ++i) {
                     stage_derivative[t][i] = stage_state[t][4 + i];
                     stage_derivative[t][4 + i] = data.acceleration[i];
                 }
-                const std::size_t stage_index = (k * refinement + s) * 4 + static_cast<std::size_t>(t);
                 stage_visitor(stage_index, data);
                 if (record_stages) {
                     trace.stage_state[stage_index] = unpack_state(stage_state[t]);

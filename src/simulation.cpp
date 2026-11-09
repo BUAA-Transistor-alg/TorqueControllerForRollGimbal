@@ -84,7 +84,7 @@ Real simulate(const ModelParameters& model, const Terrain& terrain, const State&
                 const BaseState* base, const math::Vector4d* torque, std::size_t num_steps,
                 const TrajectorySpec& spec, const LossSpec& loss, Trace& trace) {
     return detail::simulate_trajectory(
-        model, terrain, initial, base, torque, num_steps, spec, loss, trace, true,
+        model, terrain, initial, base, torque, num_steps, spec, loss, trace, true, nullptr,
         [](std::size_t, const detail::StageData&) {},
         [](std::size_t, const State&) {});
 }

@@ -44,5 +44,12 @@ void assemble_parameter_substep(const StageJacobians stage[4],
                                 math::Matrix8d& propagation,
                                 ParameterJacobian& parameter_jacobian);
 
+// 灵敏度递推 S ← W S + P，按列连续累加以便向量化
+using SensitivityMatrix = math::Matrix<Real, 8, parameters::kParameterCount>;
+void apply_sensitivity(const math::Matrix8d& propagation,
+                       const SensitivityMatrix& sensitivity,
+                       const ParameterJacobian& parameter_jacobian,
+                       SensitivityMatrix& next);
+
 }  // namespace detail
 }  // namespace gimbal

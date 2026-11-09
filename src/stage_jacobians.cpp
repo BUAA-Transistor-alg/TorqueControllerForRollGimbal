@@ -10,18 +10,22 @@ template <int Columns>
 math::Matrix<Real, 8, Columns> multiply_jacobian(
     const math::Matrix8d& jacobian, const math::Matrix<Real, 8, Columns>& matrix) {
     math::Matrix<Real, 8, Columns> result;
-    for (int column = 0; column < Columns; ++column) {
-        for (int row = 0; row < 4; ++row) {
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < Columns; ++column) {
             result.data[row][column] = matrix.data[row + 4][column];
-            Real upper = 0.0;
-            for (int k = 0; k < 4; ++k) {
-                upper += jacobian.data[4 + row][k] * matrix.data[k][column];
+            result.data[4 + row][column] = 0.0;
+        }
+        for (int k = 0; k < 4; ++k) {
+            const Real factor = jacobian.data[4 + row][k];
+            for (int column = 0; column < Columns; ++column) {
+                result.data[4 + row][column] += factor * matrix.data[k][column];
             }
-            Real lower = 0.0;
-            for (int k = 0; k < 4; ++k) {
-                lower += jacobian.data[4 + row][4 + k] * matrix.data[4 + k][column];
+        }
+        for (int k = 0; k < 4; ++k) {
+            const Real factor = jacobian.data[4 + row][4 + k];
+            for (int column = 0; column < Columns; ++column) {
+                result.data[4 + row][column] += factor * matrix.data[4 + k][column];
             }
-            result.data[4 + row][column] = upper + lower;
         }
     }
     return result;
@@ -53,6 +57,28 @@ void assemble_substep(const StageJacobians stage[4], Real h, math::Matrix8d& pro
     const math::Matrix84d basis4 =
         stage[3].input + multiply_jacobian(stage[3].state, basis3) * h;
     input_jacobian = (basis1 + basis2 * 2.0 + basis3 * 2.0 + basis4) * (h / 6.0);
+}
+
+void apply_sensitivity(const math::Matrix8d& propagation,
+                       const SensitivityMatrix& sensitivity,
+                       const ParameterJacobian& parameter_jacobian,
+                       SensitivityMatrix& next) {
+    SensitivityMatrix result;
+    for (int row = 0; row < 8; ++row) {
+        for (int column = 0; column < parameters::kParameterCount; ++column) {
+            result.data[row][column] = 0.0;
+        }
+        for (int k = 0; k < 8; ++k) {
+            const Real factor = propagation.data[row][k];
+            for (int column = 0; column < parameters::kParameterCount; ++column) {
+                result.data[row][column] += factor * sensitivity.data[k][column];
+            }
+        }
+        for (int column = 0; column < parameters::kParameterCount; ++column) {
+            result.data[row][column] += parameter_jacobian.data[row][column];
+        }
+    }
+    next = result;
 }
 
 void assemble_parameter_substep(const StageJacobians stage[4],
