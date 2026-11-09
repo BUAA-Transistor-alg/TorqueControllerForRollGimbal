@@ -1,5 +1,7 @@
 #include "gimbal_dynamics/control_gradient.hpp"
 
+#include <atomic>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -15,7 +17,6 @@ namespace {
 
 // 单样本流水线使用的阶段缓冲（每线程一份，跨调用复用）
 thread_local std::vector<detail::StageData> stage_data_buffer;
-thread_local std::vector<detail::StageJacobians> stage_jacobian_buffer;
 
 // 反向伴随扫描
 void reversePass(const simulation::LossSpec& loss, const math::Vector4d* torque,
@@ -81,23 +82,30 @@ Real simulateAndGradientThreaded(const ModelParameters& model, const Terrain& te
     simulation::validate(spec, num_steps);
     workspace.resize(num_steps, spec.refinement);
     const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
-    const std::size_t stage_count = num_steps * refinement * 4;
+    const std::size_t substep_count = num_steps * refinement;
+    const std::size_t stage_count = substep_count * 4;
     const Real h = spec.step / static_cast<Real>(spec.refinement);
     stage_data_buffer.resize(stage_count);
-    stage_jacobian_buffer.resize(stage_count);
     detail::StageData* const stage_data = stage_data_buffer.data();
-    detail::StageJacobians* const stage_jacobians = stage_jacobian_buffer.data();
+    math::Matrix8d* const propagations = workspace.propagation.data();
+    math::Matrix84d* const input_jacobians = workspace.input_jacobian.data();
     const detail::ScalarModelParameters<Real> scalar_model = detail::convert_model<Real>(model);
 
+    // 一个子步作为一个任务：工作线程顺序求四个阶段 Jacobian 并就地组装 W 与 Ψ
     auto pipeline = detail::ThreadPool::pool().start_pipeline(
-        stage_count, [stage_data, stage_jacobians, &scalar_model](std::size_t index) {
-            stage_jacobians[index] =
-                detail::evaluate_stage_jacobians(stage_data[index], scalar_model);
+        substep_count, [stage_data, propagations, input_jacobians, h, &scalar_model](
+                           std::size_t substep) {
+            detail::StageJacobians stage[4];
+            for (int t = 0; t < 4; ++t) {
+                stage[t] = detail::evaluate_stage_jacobians(
+                    stage_data[substep * 4 + static_cast<std::size_t>(t)], scalar_model);
+            }
+            detail::assemble_substep(stage, h, propagations[substep], input_jacobians[substep]);
         });
     const auto stage_visitor = [&](std::size_t stage_index, const detail::StageData&) {
         // 每个子步的四个阶段一起发布，减少生产者与工作线程之间的缓存行争用
         if ((stage_index & 3U) == 3U) {
-            pipeline.publish(stage_index);
+            pipeline.publish(stage_index / 4);
         }
     };
     const auto step_visitor = [](std::size_t, const simulation::State&) {};
@@ -105,22 +113,6 @@ Real simulateAndGradientThreaded(const ModelParameters& model, const Terrain& te
         model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace, false,
         stage_data, stage_visitor, step_visitor);
     pipeline.finish();
-
-    // 子步之间相互独立，组装阶段按子步并行
-    const std::size_t substep_count = num_steps * refinement;
-    math::Matrix8d* const propagations = workspace.propagation.data();
-    math::Matrix84d* const input_jacobians = workspace.input_jacobian.data();
-    detail::ThreadPool::pool().parallel_for(
-        substep_count, [stage_jacobians, propagations, input_jacobians, h](
-                           int, std::size_t begin, std::size_t end) {
-            detail::StageJacobians stage[4];
-            for (std::size_t substep = begin; substep < end; ++substep) {
-                for (int t = 0; t < 4; ++t) {
-                    stage[t] = stage_jacobians[substep * 4 + static_cast<std::size_t>(t)];
-                }
-                detail::assemble_substep(stage, h, propagations[substep], input_jacobians[substep]);
-            }
-        });
     if (final_state != nullptr) {
         *final_state = workspace.trace.step_end.back();
     }

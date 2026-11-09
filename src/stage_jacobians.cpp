@@ -36,12 +36,13 @@ math::Matrix<Real, 8, Columns> multiply_jacobian(
 math::Matrix8d propagation_matrix(const StageJacobians stage[4], Real h) {
     const math::Matrix8d identity = math::Matrix8d::identity();
     const math::Matrix8d a2 = identity + stage[0].state * (0.5 * h);
-    const math::Matrix8d a3 = identity + multiply_jacobian(stage[1].state, a2) * (0.5 * h);
-    const math::Matrix8d a4 = identity + multiply_jacobian(stage[2].state, a3) * h;
-    return identity + (stage[0].state + multiply_jacobian(stage[1].state, a2) * 2.0 +
-                       multiply_jacobian(stage[2].state, a3) * 2.0 +
-                       multiply_jacobian(stage[3].state, a4)) *
-                          (h / 6.0);
+    const math::Matrix8d j2a2 = multiply_jacobian(stage[1].state, a2);
+    const math::Matrix8d a3 = identity + j2a2 * (0.5 * h);
+    const math::Matrix8d j3a3 = multiply_jacobian(stage[2].state, a3);
+    const math::Matrix8d a4 = identity + j3a3 * h;
+    const math::Matrix8d j4a4 = multiply_jacobian(stage[3].state, a4);
+    return identity +
+           (stage[0].state + j2a2 * 2.0 + j3a3 * 2.0 + j4a4) * (h / 6.0);
 }
 
 }  // namespace

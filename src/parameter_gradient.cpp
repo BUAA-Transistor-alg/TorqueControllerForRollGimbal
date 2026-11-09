@@ -1,6 +1,9 @@
 #include "gimbal_dynamics/parameter_gradient.hpp"
 
+#include <atomic>
+#include <memory>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "model_evaluation.hpp"
@@ -15,10 +18,18 @@ namespace {
 
 // 单样本流水线使用的阶段缓冲（每线程一份，跨调用复用）
 thread_local std::vector<detail::StageData> stage_data_buffer;
-thread_local std::vector<detail::StageJacobians> stage_jacobian_buffer;
-thread_local std::vector<detail::ParameterJacobian> stage_parameter_buffer;
 thread_local std::vector<math::Matrix8d> substep_propagation_buffer;
 thread_local std::vector<detail::ParameterJacobian> substep_parameter_buffer;
+thread_local std::unique_ptr<std::atomic<bool>[]> substep_ready_buffer;
+thread_local std::size_t substep_ready_capacity = 0;
+
+void spin_pause() {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#else
+    std::this_thread::yield();
+#endif
+}
 
 // 串行实现：单样本单线程，批量调用与无工作线程时使用
 Real simulateAndSensitivitySerial(const ModelParameters& model, const Terrain& terrain,
@@ -75,70 +86,70 @@ Real simulateAndSensitivityThreaded(const ModelParameters& model, const Terrain&
     simulation::validate(spec, num_steps);
     workspace.resize(num_steps, spec.refinement);
     const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
-    const std::size_t stage_count = num_steps * refinement * 4;
+    const std::size_t substep_count = num_steps * refinement;
+    const std::size_t stage_count = substep_count * 4;
     const Real h = spec.step / static_cast<Real>(spec.refinement);
     stage_data_buffer.resize(stage_count);
-    stage_jacobian_buffer.resize(stage_count);
-    stage_parameter_buffer.resize(stage_count);
     detail::StageData* const stage_data = stage_data_buffer.data();
-    detail::StageJacobians* const stage_jacobians = stage_jacobian_buffer.data();
-    detail::ParameterJacobian* const stage_parameters = stage_parameter_buffer.data();
+    substep_propagation_buffer.resize(substep_count);
+    substep_parameter_buffer.resize(substep_count);
+    math::Matrix8d* const substep_propagations = substep_propagation_buffer.data();
+    detail::ParameterJacobian* const substep_parameters = substep_parameter_buffer.data();
+    if (substep_ready_capacity < substep_count) {
+        substep_ready_buffer.reset(new std::atomic<bool>[substep_count]);
+        substep_ready_capacity = substep_count;
+    }
+    std::atomic<bool>* const substep_ready = substep_ready_buffer.get();
+    for (std::size_t substep = 0; substep < substep_count; ++substep) {
+        substep_ready[substep].store(false, std::memory_order_relaxed);
+    }
     const detail::ScalarModelParameters<Real> scalar_model = detail::convert_model<Real>(model);
 
+    // 一个子步作为一个任务：工作线程顺序求四个阶段的 Jacobian、组装 W 与 P 并标记就绪
     auto pipeline = detail::ThreadPool::pool().start_pipeline(
-        stage_count, [stage_data, stage_jacobians, stage_parameters, &scalar_model](
-                         std::size_t index) {
-            stage_jacobians[index].state = math::Matrix<Real, 8, 8>::zero();
-            stage_parameters[index] = detail::evaluate_parameter_jacobian(
-                stage_data[index], scalar_model, stage_jacobians[index].state);
+        substep_count, [stage_data, substep_ready, substep_propagations, substep_parameters, h,
+                        &scalar_model](std::size_t substep) {
+            detail::StageJacobians stage[4];
+            detail::ParameterJacobian stage_parameter[4];
+            for (int t = 0; t < 4; ++t) {
+                const std::size_t index = substep * 4 + static_cast<std::size_t>(t);
+                stage[t].state = math::Matrix<Real, 8, 8>::zero();
+                stage_parameter[t] = detail::evaluate_parameter_jacobian(
+                    stage_data[index], scalar_model, stage[t].state);
+            }
+            detail::assemble_parameter_substep(stage, stage_parameter, h,
+                                               substep_propagations[substep],
+                                               substep_parameters[substep]);
+            substep_ready[substep].store(true, std::memory_order_release);
         });
     const auto stage_visitor = [&](std::size_t stage_index, const detail::StageData&) {
         // 每个子步的四个阶段一起发布，减少生产者与工作线程之间的缓存行争用
         if ((stage_index & 3U) == 3U) {
-            pipeline.publish(stage_index);
+            pipeline.publish(stage_index / 4);
         }
     };
     const auto step_visitor = [](std::size_t, const simulation::State&) {};
     const Real loss_value = detail::simulate_trajectory(
         model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace, false,
         stage_data, stage_visitor, step_visitor);
-    pipeline.finish();
 
-    // 子步之间相互独立，组装阶段按子步并行
-    const std::size_t substep_count = num_steps * refinement;
-    substep_propagation_buffer.resize(substep_count);
-    substep_parameter_buffer.resize(substep_count);
-    math::Matrix8d* const substep_propagations = substep_propagation_buffer.data();
-    detail::ParameterJacobian* const substep_parameters = substep_parameter_buffer.data();
-    detail::ThreadPool::pool().parallel_for(
-        substep_count, [stage_jacobians, stage_parameters, substep_propagations,
-                        substep_parameters, h](int, std::size_t begin, std::size_t end) {
-            detail::StageJacobians stage[4];
-            detail::ParameterJacobian stage_parameter[4];
-            for (std::size_t substep = begin; substep < end; ++substep) {
-                for (int t = 0; t < 4; ++t) {
-                    stage[t] = stage_jacobians[substep * 4 + static_cast<std::size_t>(t)];
-                    stage_parameter[t] =
-                        stage_parameters[substep * 4 + static_cast<std::size_t>(t)];
-                }
-                detail::assemble_parameter_substep(stage, stage_parameter, h,
-                                                   substep_propagations[substep],
-                                                   substep_parameters[substep]);
-            }
-        });
-
+    // 子步按顺序就绪后立即推进灵敏度，与剩余工作线程的计算重叠
     math::Matrix<Real, 8, parameters::kParameterCount> sensitivity =
         math::Matrix<Real, 8, parameters::kParameterCount>::zero();
     Gradient total = Gradient::zero();
     for (std::size_t k = 0; k < num_steps; ++k) {
         for (std::size_t s = 0; s < refinement; ++s) {
             const std::size_t substep = k * refinement + s;
+            while (!substep_ready[substep].load(std::memory_order_acquire)) {
+                spin_pause();
+            }
             detail::apply_sensitivity(substep_propagations[substep], sensitivity,
                                       substep_parameters[substep], sensitivity);
         }
         total += transpose(sensitivity) *
                  simulation::step_loss_gradient(loss, num_steps, k, workspace.trace.step_end[k]);
     }
+    pipeline.finish();
     if (final_state != nullptr) {
         *final_state = workspace.trace.step_end.back();
     }

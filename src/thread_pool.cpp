@@ -257,6 +257,23 @@ void ThreadPool::Pipeline::publish(std::size_t index) {
 
 void ThreadPool::Pipeline::finish() {
     job_->producer_done.store(true, std::memory_order_release);
+    // 生产者结束后调用线程继续领取剩余任务，避免只等不干活
+    for (;;) {
+        std::size_t current = job_->claimed.load(std::memory_order_relaxed);
+        if (current >= job_->count) {
+            break;
+        }
+        if (job_->available.load(std::memory_order_acquire) <= current) {
+            if (job_->claimed.load(std::memory_order_relaxed) >= job_->count) {
+                break;
+            }
+            __builtin_ia32_pause();
+            continue;
+        }
+        if (job_->claimed.compare_exchange_weak(current, current + 1)) {
+            job_->worker(current);
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(pool_->mutex_);
         if (--job_->pending == 0) {
