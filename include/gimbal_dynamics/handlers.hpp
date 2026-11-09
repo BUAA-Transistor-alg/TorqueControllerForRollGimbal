@@ -231,7 +231,8 @@ struct ParameterSensitivityBatchOutputT {
 template <typename Real>
 class SingleStepDynamics {
 public:
-    explicit SingleStepDynamics(int thread_count) {
+    // 默认 1 个线程：单步计算本身是串行的
+    explicit SingleStepDynamics(int thread_count = 1) {
         gimbal_abi::ContextConfig config{thread_count};
         context_ = detail::BackendTraits<Real>::create(config);
         if (context_ == nullptr) {
@@ -267,7 +268,8 @@ private:
 template <typename Real>
 class ForwardSimulation {
 public:
-    explicit ForwardSimulation(int thread_count) {
+    // 默认 1 个线程：单样本前向是串行计算
+    explicit ForwardSimulation(int thread_count = 1) {
         gimbal_abi::ContextConfig config{thread_count};
         context_ = detail::BackendTraits<Real>::create(config);
         if (context_ == nullptr) {
@@ -335,7 +337,8 @@ private:
 template <typename Real>
 class ControlGradient {
 public:
-    explicit ControlGradient(int thread_count) {
+    // 默认 8 个线程（含调用线程）：前向由调用线程承担，工作线程求阶段 Jacobian
+    explicit ControlGradient(int thread_count = 8) {
         gimbal_abi::ContextConfig config{thread_count};
         context_ = detail::BackendTraits<Real>::create(config);
         if (context_ == nullptr) {
@@ -398,7 +401,8 @@ private:
 template <typename Real>
 class ParameterSensitivity {
 public:
-    explicit ParameterSensitivity(int thread_count) {
+    // 默认 8 个线程（含调用线程）：工作线程求阶段 Jacobian 与子步组装
+    explicit ParameterSensitivity(int thread_count = 8) {
         gimbal_abi::ContextConfig config{thread_count};
         context_ = detail::BackendTraits<Real>::create(config);
         if (context_ == nullptr) {

@@ -1,4 +1,5 @@
-// 校验：处理器线程数由构造参数决定，批量大小由每次调用指定；结果与串行一致；单精度与双精度结果接近。
+// 校验：处理器线程数由构造参数决定，缺省时使用默认值；批量大小由每次调用指定；
+// 结果与串行一致；单精度与双精度结果接近。
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
@@ -31,6 +32,36 @@ int main() {
                 return 1;
             }
         }
+    }
+
+    ControlGradient<double> default_control;
+    ControlGradientOutputT<double> default_control_output;
+    default_control.run(input, default_control_output);
+    if (default_control_output.loss != parallel_output.loss) {
+        printf("默认线程数与 8 线程结果不一致\n");
+        return 1;
+    }
+
+    ForwardSimulation<double> default_forward;
+    ForwardSimulation<double> explicit_forward(1);
+    ForwardOutputT<double> default_forward_output;
+    ForwardOutputT<double> explicit_forward_output;
+    default_forward.run(support::forward_input(problem), default_forward_output);
+    explicit_forward.run(support::forward_input(problem), explicit_forward_output);
+    if (default_forward_output.loss != explicit_forward_output.loss) {
+        printf("前向仿真默认线程数结果不一致\n");
+        return 1;
+    }
+
+    ParameterSensitivity<double> default_parameter;
+    ParameterSensitivityOutputT<double> default_parameter_output;
+    default_parameter.run(support::parameter_input(problem), default_parameter_output);
+    ParameterSensitivity<double> explicit_parameter(8);
+    ParameterSensitivityOutputT<double> explicit_parameter_output;
+    explicit_parameter.run(support::parameter_input(problem), explicit_parameter_output);
+    if (default_parameter_output.loss != explicit_parameter_output.loss) {
+        printf("参数灵敏度默认线程数结果不一致\n");
+        return 1;
     }
 
     const std::size_t batch = 3;
