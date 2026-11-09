@@ -60,6 +60,7 @@ Real simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain
                             Gradient* gradient, simulation::State* final_state);
 
 // 批量前向仿真 + 前向灵敏度传播，样本之间独立、按参与者线程并行。
+// batch=0 时直接返回 0，不校验输入。
 //   initial、final_state、loss 长度 batch；
 //   base、torque 长度 batch*num_steps，按样本连续排列；
 //   gradient 长度 batch，返回批内各样本损失的平均值。
