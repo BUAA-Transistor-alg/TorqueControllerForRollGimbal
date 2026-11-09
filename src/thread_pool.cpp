@@ -17,6 +17,7 @@ struct ThreadPool::Job {
     alignas(64) std::atomic<std::size_t> available{0};
     alignas(64) std::atomic<std::size_t> claimed{0};
     alignas(64) std::atomic<std::size_t> next{0};
+    std::size_t dynamic_chunk = 1;
     alignas(64) std::atomic<bool> producer_done{false};
     alignas(64) int pending = 0;
 };
@@ -107,11 +108,15 @@ void ThreadPool::worker_loop(int worker_index) {
         }
         if (job->dynamic) {
             for (;;) {
-                const std::size_t index = job->next.fetch_add(1, std::memory_order_relaxed);
-                if (index >= job->count) {
+                const std::size_t base =
+                    job->next.fetch_add(job->dynamic_chunk, std::memory_order_relaxed);
+                if (base >= job->count) {
                     break;
                 }
-                job->dynamic(worker_index + 1, index);
+                const std::size_t end = std::min(job->count, base + job->dynamic_chunk);
+                for (std::size_t index = base; index < end; ++index) {
+                    job->dynamic(worker_index + 1, index);
+                }
             }
         } else if (job->worker) {
             for (;;) {
@@ -198,9 +203,13 @@ void ThreadPool::parallel_for(
 }
 
 void ThreadPool::parallel_dynamic(
-    std::size_t count, const std::function<void(int, std::size_t)>& function) {
+    std::size_t count, const std::function<void(int, std::size_t)>& function,
+    std::size_t chunk) {
     if (count == 0) {
         return;
+    }
+    if (chunk == 0) {
+        chunk = 1;
     }
     std::lock_guard<std::mutex> execution_guard(execution_mutex_);
     if (worker_count() == 0) {
@@ -212,6 +221,7 @@ void ThreadPool::parallel_dynamic(
     std::shared_ptr<Job> job(new Job());
     job->count = count;
     job->dynamic = function;
+    job->dynamic_chunk = chunk;
     job->pending = participant_count();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -219,11 +229,14 @@ void ThreadPool::parallel_dynamic(
     }
     condition_.notify_all();
     for (;;) {
-        const std::size_t index = job->next.fetch_add(1, std::memory_order_relaxed);
-        if (index >= count) {
+        const std::size_t base = job->next.fetch_add(chunk, std::memory_order_relaxed);
+        if (base >= count) {
             break;
         }
-        function(0, index);
+        const std::size_t end = std::min(count, base + chunk);
+        for (std::size_t index = base; index < end; ++index) {
+            function(0, index);
+        }
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);

@@ -15,8 +15,8 @@ namespace gimbal {
 namespace control_gradient {
 namespace {
 
-// 单样本流水线使用的阶段缓冲（每线程一份，跨调用复用）
-thread_local std::vector<detail::StageData> stage_data_buffer;
+// 单样本流水线使用的阶段输入缓冲（每线程一份，跨调用复用）
+thread_local std::vector<detail::StageInput> stage_input_buffer;
 
 // 反向伴随扫描
 void reversePass(const simulation::LossSpec& loss, const math::Vector4d* torque,
@@ -85,33 +85,42 @@ Real simulateAndGradientThreaded(const ModelParameters& model, const Terrain& te
     const std::size_t substep_count = num_steps * refinement;
     const std::size_t stage_count = substep_count * 4;
     const Real h = spec.step / static_cast<Real>(spec.refinement);
-    stage_data_buffer.resize(stage_count);
-    detail::StageData* const stage_data = stage_data_buffer.data();
+    stage_input_buffer.resize(stage_count);
+    detail::StageInput* const stage_inputs = stage_input_buffer.data();
     math::Matrix8d* const propagations = workspace.propagation.data();
     math::Matrix84d* const input_jacobians = workspace.input_jacobian.data();
     const detail::ScalarModelParameters<Real> scalar_model = detail::convert_model<Real>(model);
+    const detail::TerrainFrame<Real> terrain_frame =
+        detail::evaluate_terrain_frame(detail::convert_terrain<Real>(terrain));
 
-    // 一个子步作为一个任务：工作线程顺序求四个阶段 Jacobian 并就地组装 W 与 Ψ
+    // 一个子步作为一个任务：工作线程重算阶段中间量、求 Jacobian 并组装 W 与 Ψ
     auto pipeline = detail::ThreadPool::pool().start_pipeline(
-        substep_count, [stage_data, propagations, input_jacobians, h, &scalar_model](
-                           std::size_t substep) {
+        substep_count, [stage_inputs, propagations, input_jacobians, h, &scalar_model,
+                        &terrain_frame](std::size_t substep) {
             detail::StageJacobians stage[4];
             for (int t = 0; t < 4; ++t) {
-                stage[t] = detail::evaluate_stage_jacobians(
-                    stage_data[substep * 4 + static_cast<std::size_t>(t)], scalar_model);
+                const detail::StageInput& input =
+                    stage_inputs[substep * 4 + static_cast<std::size_t>(t)];
+                simulation::State state;
+                state.angle = input.angle;
+                state.velocity = input.qdot;
+                detail::StageData data;
+                detail::evaluate_stage_data(scalar_model, terrain_frame, input.base, state,
+                                            input.torque, data);
+                stage[t] = detail::evaluate_stage_jacobians(data, scalar_model);
             }
             detail::assemble_substep(stage, h, propagations[substep], input_jacobians[substep]);
         });
-    const auto stage_visitor = [&](std::size_t stage_index, const detail::StageData&) {
+    const auto stage_visitor = [&](std::size_t stage_index, const detail::StageInput&) {
         // 每个子步的四个阶段一起发布，减少生产者与工作线程之间的缓存行争用
         if ((stage_index & 3U) == 3U) {
             pipeline.publish(stage_index / 4);
         }
     };
     const auto step_visitor = [](std::size_t, const simulation::State&) {};
-    const Real loss_value = detail::simulate_trajectory(
-        model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace, false,
-        stage_data, stage_visitor, step_visitor);
+    const Real loss_value = detail::simulate_trajectory_inputs(
+        model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace,
+        stage_inputs, stage_visitor, step_visitor);
     pipeline.finish();
     if (final_state != nullptr) {
         *final_state = workspace.trace.step_end.back();
@@ -186,7 +195,7 @@ Real simulateAndGradientBatch(const ModelParameters& model, const Terrain& terra
                 model, terrain, initial[sample], base + offset, torque + offset, num_steps, spec,
                 loss[sample], work, (gradient != nullptr) ? gradient + offset : nullptr,
                 (final_state != nullptr) ? final_state + sample : nullptr);
-        });
+        }, 2);
     Real total = Real(0);
     for (std::size_t sample = 0; sample < batch; ++sample) {
         total += loss_values[sample];

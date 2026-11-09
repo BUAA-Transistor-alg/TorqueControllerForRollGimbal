@@ -42,9 +42,10 @@ public:
                       const std::function<void(int participant, std::size_t begin,
                                                std::size_t end)>& function);
 
-    // 动态领取：每个参与者按需领取下一个下标，适合任务代价相近但核心异构的场景
+    // 动态领取：每个参与者按需领取一段下标，适合任务代价相近但核心异构的场景
     void parallel_dynamic(std::size_t count,
-                          const std::function<void(int participant, std::size_t index)>& function);
+                          const std::function<void(int participant, std::size_t index)>& function,
+                          std::size_t chunk = 1);
 
     class Pipeline {
     public:

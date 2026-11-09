@@ -16,8 +16,8 @@ namespace gimbal {
 namespace parameter_gradient {
 namespace {
 
-// 单样本流水线使用的阶段缓冲（每线程一份，跨调用复用）
-thread_local std::vector<detail::StageData> stage_data_buffer;
+// 单样本流水线使用的阶段输入缓冲（每线程一份，跨调用复用）
+thread_local std::vector<detail::StageInput> stage_input_buffer;
 thread_local std::vector<math::Matrix8d> substep_propagation_buffer;
 thread_local std::vector<detail::ParameterJacobian> substep_parameter_buffer;
 thread_local std::unique_ptr<std::atomic<bool>[]> substep_ready_buffer;
@@ -89,8 +89,8 @@ Real simulateAndSensitivityThreaded(const ModelParameters& model, const Terrain&
     const std::size_t substep_count = num_steps * refinement;
     const std::size_t stage_count = substep_count * 4;
     const Real h = spec.step / static_cast<Real>(spec.refinement);
-    stage_data_buffer.resize(stage_count);
-    detail::StageData* const stage_data = stage_data_buffer.data();
+    stage_input_buffer.resize(stage_count);
+    detail::StageInput* const stage_inputs = stage_input_buffer.data();
     substep_propagation_buffer.resize(substep_count);
     substep_parameter_buffer.resize(substep_count);
     math::Matrix8d* const substep_propagations = substep_propagation_buffer.data();
@@ -104,34 +104,43 @@ Real simulateAndSensitivityThreaded(const ModelParameters& model, const Terrain&
         substep_ready[substep].store(false, std::memory_order_relaxed);
     }
     const detail::ScalarModelParameters<Real> scalar_model = detail::convert_model<Real>(model);
+    const detail::TerrainFrame<Real> terrain_frame =
+        detail::evaluate_terrain_frame(detail::convert_terrain<Real>(terrain));
 
-    // 一个子步作为一个任务：工作线程顺序求四个阶段的 Jacobian、组装 W 与 P 并标记就绪
+    // 一个子步作为一个任务：工作线程重算阶段中间量、求四个阶段 Jacobian、组装 W 与 P 并标记就绪
     auto pipeline = detail::ThreadPool::pool().start_pipeline(
-        substep_count, [stage_data, substep_ready, substep_propagations, substep_parameters, h,
-                        &scalar_model](std::size_t substep) {
+        substep_count, [stage_inputs, substep_ready, substep_propagations, substep_parameters, h,
+                        &scalar_model, &terrain_frame](std::size_t substep) {
             detail::StageJacobians stage[4];
             detail::ParameterJacobian stage_parameter[4];
             for (int t = 0; t < 4; ++t) {
-                const std::size_t index = substep * 4 + static_cast<std::size_t>(t);
+                const detail::StageInput& input =
+                    stage_inputs[substep * 4 + static_cast<std::size_t>(t)];
+                simulation::State state;
+                state.angle = input.angle;
+                state.velocity = input.qdot;
+                detail::StageData data;
+                detail::evaluate_stage_data(scalar_model, terrain_frame, input.base, state,
+                                            input.torque, data);
                 stage[t].state = math::Matrix<Real, 8, 8>::zero();
-                stage_parameter[t] = detail::evaluate_parameter_jacobian(
-                    stage_data[index], scalar_model, stage[t].state);
+                stage_parameter[t] = detail::evaluate_parameter_jacobian(data, scalar_model,
+                                                                        stage[t].state);
             }
             detail::assemble_parameter_substep(stage, stage_parameter, h,
                                                substep_propagations[substep],
                                                substep_parameters[substep]);
             substep_ready[substep].store(true, std::memory_order_release);
         });
-    const auto stage_visitor = [&](std::size_t stage_index, const detail::StageData&) {
+    const auto stage_visitor = [&](std::size_t stage_index, const detail::StageInput&) {
         // 每个子步的四个阶段一起发布，减少生产者与工作线程之间的缓存行争用
         if ((stage_index & 3U) == 3U) {
             pipeline.publish(stage_index / 4);
         }
     };
     const auto step_visitor = [](std::size_t, const simulation::State&) {};
-    const Real loss_value = detail::simulate_trajectory(
-        model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace, false,
-        stage_data, stage_visitor, step_visitor);
+    const Real loss_value = detail::simulate_trajectory_inputs(
+        model, terrain, initial, base, torque, num_steps, spec, loss, workspace.trace,
+        stage_inputs, stage_visitor, step_visitor);
 
     // 子步按顺序就绪后立即推进灵敏度，与剩余工作线程的计算重叠
     math::Matrix<Real, 8, parameters::kParameterCount> sensitivity =
@@ -218,7 +227,7 @@ Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& te
                 model, terrain, initial[sample], base + offset, torque + offset, num_steps, spec,
                 loss[sample], work, (gradient != nullptr) ? gradient + sample : nullptr,
                 (final_state != nullptr) ? final_state + sample : nullptr);
-        });
+        }, 2);
     Real total = Real(0);
     for (std::size_t sample = 0; sample < batch; ++sample) {
         total += loss_values[sample];
