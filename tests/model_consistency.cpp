@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <type_traits>
 
 #include "gimbal_dynamics/dynamics_model.hpp"
 #include "gimbal_dynamics/simulation.hpp"
@@ -23,7 +24,7 @@ int main() {
         }
     }
 
-    double max_relative = 0.0;
+    Real max_relative = Real(0);
     for (int trial = 0; trial < 200; ++trial) {
         Terrain terrain;
         terrain.slope_angle = 0.3 * unit(rng);
@@ -55,15 +56,18 @@ int main() {
             simulation::state_derivative(model, terrain, base, state, torque);
 
         for (int i = 0; i < 4; ++i) {
-            const double error = std::fabs(closed[i] - derivative[4 + i]);
-            max_relative = std::max(max_relative, error / std::max(1.0, std::fabs(closed[i])));
-            max_relative = std::max(max_relative,
-                                    std::fabs(qdot[i] - derivative[i]) / std::max(1.0, std::fabs(qdot[i])));
+            const Real error = std::fabs(closed[i] - derivative[4 + i]);
+            max_relative = std::max(max_relative, error / std::max(Real(1), std::fabs(closed[i])));
+            max_relative = std::max(
+                max_relative,
+                std::fabs(qdot[i] - derivative[i]) / std::max(Real(1), std::fabs(qdot[i])));
         }
     }
 
-    printf("闭式形式与逆动力学递推形式的最大相对偏差 = %.3e\n", max_relative);
-    if (!(max_relative < 1e-10)) {
+    printf("闭式形式与逆动力学递推形式的最大相对偏差 = %.3e\n",
+           static_cast<double>(max_relative));
+    const Real tolerance = std::is_same<Real, float>::value ? Real(1e-4) : Real(1e-10);
+    if (!(max_relative < tolerance)) {
         printf("校验失败\n");
         return 1;
     }

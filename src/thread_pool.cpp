@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <stdexcept>
 #include <thread>
 
 namespace gimbal {
@@ -286,9 +287,14 @@ void ThreadPool::Pipeline::finish() {
         std::unique_lock<std::mutex> lock(pool_->mutex_);
         pool_->condition_.wait(lock, [&] { return job_->pending == 0; });
     }
+    const std::size_t published = job_->available.load(std::memory_order_acquire);
+    const std::size_t count = job_->count;
     finished_ = true;
     if (execution_lock_.owns_lock()) {
         execution_lock_.unlock();
+    }
+    if (published < count) {
+        throw std::runtime_error("流水线任务未全部发布");
     }
 }
 

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <type_traits>
 #include <vector>
 
 #include "gimbal_dynamics/control_gradient.hpp"
@@ -77,8 +78,9 @@ Inputs make_inputs(const Config& config) {
     return inputs;
 }
 
+#ifndef GIMBAL_REAL_FLOAT
 // 参数的典型量级，用于选取中心差分的步长（参数值为 0 时也能给出合适步长）
-double parameter_characteristic(int index) {
+Real parameter_characteristic(int index) {
     if (index < parameters::kBodyCount * parameters::kBodyParameterCount) {
         const int slot = index % parameters::kBodyParameterCount;
         if (slot == 0) {
@@ -96,9 +98,10 @@ double parameter_characteristic(int index) {
 }
 
 double parameter_step(const ModelParameters& model, int index) {
-    const double value = parameters::value(model, index);
-    return 1e-5 * std::max(std::fabs(value), parameter_characteristic(index));
+    const Real value = parameters::value(model, index);
+    return static_cast<double>(1e-5 * std::max(std::fabs(value), parameter_characteristic(index)));
 }
+#endif
 
 bool check_forward_consistency(const Inputs& inputs, bool verbose) {
     control_gradient::Workspace control_workspace;
@@ -163,7 +166,8 @@ bool check_forward_consistency(const Inputs& inputs, bool verbose) {
 }
 
 bool nearly_equal(double actual, double expected) {
-    return std::fabs(actual - expected) <= 1e-12 * std::max(1.0, std::fabs(expected));
+    const double tolerance = std::is_same<Real, float>::value ? 1e-5 : 1e-12;
+    return std::fabs(actual - expected) <= tolerance * std::max(1.0, std::fabs(expected));
 }
 
 // 校验参数编号与模型字段的对应关系
@@ -208,6 +212,7 @@ bool check_parameter_layout() {
     return ok;
 }
 
+#ifndef GIMBAL_REAL_FLOAT
 double check_torque_gradient(const Inputs& inputs, bool verbose) {
     control_gradient::Workspace workspace;
     const std::size_t num_steps = inputs.base.size();
@@ -307,9 +312,22 @@ CaseResult run_case(const Config& config, bool verbose) {
     result.parameter_relative = check_parameter_gradient(inputs, verbose);
     return result;
 }
+#endif
 
 }  // namespace
 
+#ifdef GIMBAL_REAL_FLOAT
+int main() {
+    const bool layout_ok = check_parameter_layout();
+    printf("参数编号与模型字段对应关系：%s\n", layout_ok ? "一致" : "不一致");
+    const Inputs inputs = make_inputs(Config{8, 2, 0.01, 1.0});
+    const bool forward_ok = check_forward_consistency(inputs, true);
+    printf("float 构建下跳过有限差分对比（步长与容差按 double 设计）\n");
+    const bool ok = layout_ok && forward_ok;
+    printf("%s\n", ok ? "校验通过" : "校验失败");
+    return ok ? 0 : 1;
+}
+#else
 int main() {
     const bool layout_ok = check_parameter_layout();
     printf("参数编号与模型字段对应关系：%s\n", layout_ok ? "一致" : "不一致");
@@ -354,3 +372,4 @@ int main() {
     printf("%s\n", ok ? "校验通过" : "校验失败");
     return ok ? 0 : 1;
 }
+#endif
