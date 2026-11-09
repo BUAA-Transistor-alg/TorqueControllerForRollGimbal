@@ -40,15 +40,15 @@ bool parameter_layout() {
 bool check_double() {
     auto problem = support::make_problem<double>(6);
     problem.spec.refinement = 1;
-    ControlGradient<double> control(2, 1);
+    ControlGradient<double> control(2);
     ControlGradientOutputT<double> output;
     control.run(support::control_input(problem), output);
 
-    ForwardSimulation<double> forward(1, 1);
+    ForwardSimulation<double> forward(1);
     ForwardOutputT<double> forward_output;
     forward.run(support::forward_input(problem), forward_output);
 
-    ParameterSensitivity<double> sensitivity(1, 1);
+    ParameterSensitivity<double> sensitivity(1);
     ParameterSensitivityOutputT<double> sensitivity_output;
     sensitivity.run(support::parameter_input(problem), sensitivity_output);
     if (sensitivity_output.loss != output.loss || forward_output.loss != output.loss) {
@@ -89,8 +89,8 @@ bool check_double() {
         parameters::set_value(minus.model, index, value - Real(epsilon));
         ParameterSensitivityOutputT<double> plus_output;
         ParameterSensitivityOutputT<double> minus_output;
-        ParameterSensitivity<double> plus_handler(1, 1);
-        ParameterSensitivity<double> minus_handler(1, 1);
+        ParameterSensitivity<double> plus_handler(1);
+        ParameterSensitivity<double> minus_handler(1);
         plus_handler.run(support::parameter_input(plus), plus_output);
         minus_handler.run(support::parameter_input(minus), minus_output);
         const double difference =
@@ -111,11 +111,11 @@ bool check_double() {
 
 bool check_float() {
     auto problem = support::make_problem<float>(20);
-    ControlGradient<float> handler(4, 1);
+    ControlGradient<float> handler(4);
     ControlGradientOutputT<float> output;
     handler.run(support::control_input(problem), output);
     auto problem_double = support::make_problem<double>(20);
-    ControlGradient<double> double_handler(4, 1);
+    ControlGradient<double> double_handler(4);
     ControlGradientOutputT<double> double_output;
     double_handler.run(support::control_input(problem_double), double_output);
     const double error = std::fabs(static_cast<double>(output.loss) -

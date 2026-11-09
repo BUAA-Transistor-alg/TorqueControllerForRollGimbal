@@ -14,8 +14,8 @@ template <typename Real>
 Real run_check() {
     std::mt19937 rng(20261108);
     std::uniform_real_distribution<double> unit(-1.0, 1.0);
-    SingleStepDynamics<Real> single(1, 1);
-    ForwardSimulation<Real> forward(1, 1);
+    SingleStepDynamics<Real> single(1);
+    ForwardSimulation<Real> forward(1);
 
     Real max_relative = Real(0);
     for (int trial = 0; trial < 200; ++trial) {

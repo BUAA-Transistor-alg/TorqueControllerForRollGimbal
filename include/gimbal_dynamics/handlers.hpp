@@ -1,7 +1,7 @@
 #pragma once
 
-// 公开处理器：按精度模板化，构造时给定线程数与最大批量，构造阶段分配线程，
-// 之后用 run/runBatch 传入输入结构体并写回输出结构体。
+// 公开处理器：按精度模板化，构造时给定线程数并在构造阶段分配线程，
+// 之后用 run/runBatch 传入输入结构体并写回输出结构体，批量大小由每次调用指定。
 // 线程数、精度均不依赖编译选项或环境变量。
 
 #include <cstddef>
@@ -231,8 +231,8 @@ struct ParameterSensitivityBatchOutputT {
 template <typename Real>
 class SingleStepDynamics {
 public:
-    SingleStepDynamics(int thread_count, std::size_t max_batch_size) {
-        gimbal_abi::ContextConfig config{thread_count, max_batch_size};
+    explicit SingleStepDynamics(int thread_count) {
+        gimbal_abi::ContextConfig config{thread_count};
         context_ = detail::BackendTraits<Real>::create(config);
         if (context_ == nullptr) {
             throw std::runtime_error("后端线程池创建失败");
@@ -267,8 +267,8 @@ private:
 template <typename Real>
 class ForwardSimulation {
 public:
-    ForwardSimulation(int thread_count, std::size_t max_batch_size) : max_batch_(max_batch_size) {
-        gimbal_abi::ContextConfig config{thread_count, max_batch_size};
+    explicit ForwardSimulation(int thread_count) {
+        gimbal_abi::ContextConfig config{thread_count};
         context_ = detail::BackendTraits<Real>::create(config);
         if (context_ == nullptr) {
             throw std::runtime_error("后端线程池创建失败");
@@ -308,7 +308,6 @@ public:
 
     void runBatch(std::size_t batch, const ControlGradientBatchInputT<Real>& input,
                   ForwardBatchOutputT<Real>& output) const {
-        require_batch(batch);
         output.step_end.resize(batch * input.num_steps);
         output.final_state.resize(batch);
         gimbal_abi::BatchGradientInput abi{};
@@ -329,22 +328,15 @@ public:
     }
 
 private:
-    void require_batch(std::size_t batch) const {
-        if (batch > max_batch_) {
-            throw std::invalid_argument("批量大小超过构造时设置的最大批量");
-        }
-    }
-
     GimbalAbiContext* context_ = nullptr;
-    std::size_t max_batch_ = 1;
 };
 
 // 控制量梯度处理器
 template <typename Real>
 class ControlGradient {
 public:
-    ControlGradient(int thread_count, std::size_t max_batch_size) : max_batch_(max_batch_size) {
-        gimbal_abi::ContextConfig config{thread_count, max_batch_size};
+    explicit ControlGradient(int thread_count) {
+        gimbal_abi::ContextConfig config{thread_count};
         context_ = detail::BackendTraits<Real>::create(config);
         if (context_ == nullptr) {
             throw std::runtime_error("后端线程池创建失败");
@@ -379,7 +371,6 @@ public:
 
     void runBatch(std::size_t batch, const ControlGradientBatchInputT<Real>& input,
                   ControlGradientBatchOutputT<Real>& output) const {
-        require_batch(batch);
         output.gradient.resize(batch * input.num_steps);
         output.final_state.resize(batch);
         gimbal_abi::BatchGradientInput abi{};
@@ -400,22 +391,15 @@ public:
     }
 
 private:
-    void require_batch(std::size_t batch) const {
-        if (batch > max_batch_) {
-            throw std::invalid_argument("批量大小超过构造时设置的最大批量");
-        }
-    }
-
     GimbalAbiContext* context_ = nullptr;
-    std::size_t max_batch_ = 1;
 };
 
 // 参数灵敏度处理器
 template <typename Real>
 class ParameterSensitivity {
 public:
-    ParameterSensitivity(int thread_count, std::size_t max_batch_size) : max_batch_(max_batch_size) {
-        gimbal_abi::ContextConfig config{thread_count, max_batch_size};
+    explicit ParameterSensitivity(int thread_count) {
+        gimbal_abi::ContextConfig config{thread_count};
         context_ = detail::BackendTraits<Real>::create(config);
         if (context_ == nullptr) {
             throw std::runtime_error("后端线程池创建失败");
@@ -450,7 +434,6 @@ public:
 
     void runBatch(std::size_t batch, const ParameterSensitivityBatchInputT<Real>& input,
                   ParameterSensitivityBatchOutputT<Real>& output) const {
-        require_batch(batch);
         output.gradient.resize(batch);
         output.final_state.resize(batch);
         gimbal_abi::BatchGradientInput abi{};
@@ -471,14 +454,7 @@ public:
     }
 
 private:
-    void require_batch(std::size_t batch) const {
-        if (batch > max_batch_) {
-            throw std::invalid_argument("批量大小超过构造时设置的最大批量");
-        }
-    }
-
     GimbalAbiContext* context_ = nullptr;
-    std::size_t max_batch_ = 1;
 };
 
 }  // namespace gimbal

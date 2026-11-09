@@ -45,10 +45,10 @@ int main() {
     auto input = support::control_input(problem);
     auto parameter_input = support::parameter_input(problem);
 
-    ControlGradient<double> reference(1, 1);
+    ControlGradient<double> reference(1);
     ControlGradientOutputT<double> reference_output;
     reference.run(input, reference_output);
-    ParameterSensitivity<double> reference_parameter(1, 1);
+    ParameterSensitivity<double> reference_parameter(1);
     ParameterSensitivityOutputT<double> reference_parameter_output;
     reference_parameter.run(parameter_input, reference_parameter_output);
 
@@ -58,12 +58,12 @@ int main() {
     std::vector<std::thread> threads;
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&, t] {
-            ControlGradient<double> handler(2, 1);
+            ControlGradient<double> handler(2);
             ControlGradientOutputT<double> output;
             handler.run(input, output);
             control_ok[t] = output.loss == reference_output.loss &&
                             same_gradient(output.gradient, reference_output.gradient);
-            ParameterSensitivity<double> sensitivity(2, 1);
+            ParameterSensitivity<double> sensitivity(2);
             ParameterSensitivityOutputT<double> sensitivity_output;
             sensitivity.run(parameter_input, sensitivity_output);
             parameter_ok[t] = sensitivity_output.loss == reference_parameter_output.loss &&
@@ -101,7 +101,7 @@ int main() {
     batch_input.num_steps = problem.num_steps;
     batch_input.spec = problem.spec;
     batch_input.loss = losses.data();
-    ControlGradient<double> batch_handler(4, batch);
+    ControlGradient<double> batch_handler(4);
     ControlGradientBatchOutputT<double> batch_output;
     batch_handler.runBatch(batch, batch_input, batch_output);
     std::vector<math::Vector<double, 4>> sample_gradient(problem.num_steps);

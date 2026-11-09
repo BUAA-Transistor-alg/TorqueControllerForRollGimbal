@@ -21,7 +21,7 @@ bool run_normal(ControlGradient<double>& handler, const support::Problem<double>
 
 int main() {
     auto problem = support::make_problem<double>(12);
-    ControlGradient<double> handler(4, 2);
+    ControlGradient<double> handler(4);
 
     if (!run_normal(handler, problem)) {
         printf("初始调用失败\n");
@@ -76,7 +76,7 @@ int main() {
         input.loss.target_angle = nullptr;
         input.loss.target_velocity = nullptr;
         ParameterSensitivityOutputT<double> output;
-        ParameterSensitivity<double> sensitivity(4, 2);
+        ParameterSensitivity<double> sensitivity(4);
         sensitivity.run(input, output);
     } catch (const std::exception&) {
         threw = true;

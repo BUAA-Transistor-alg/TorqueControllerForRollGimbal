@@ -25,11 +25,9 @@ namespace {
 // 每个精度后端各有一份自己的上下文类型，通过不透明指针暴露给处理器
 struct BackendContext {
     explicit BackendContext(const gimbal_abi::ContextConfig& config)
-        : pool(config.thread_count > 1 ? config.thread_count - 1 : 0),
-          max_batch(config.max_batch == 0 ? 1 : config.max_batch) {}
+        : pool(config.thread_count > 1 ? config.thread_count - 1 : 0) {}
 
     gimbal::detail::ThreadPool pool;
-    std::size_t max_batch = 1;
     gimbal::control_gradient::Workspace control_single;
     gimbal::parameter_gradient::Workspace parameter_single;
     gimbal::control_gradient::BatchWorkspace control_batch;

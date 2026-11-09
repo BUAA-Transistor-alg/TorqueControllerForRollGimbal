@@ -13,11 +13,11 @@ int main() {
     auto problem = support::make_problem<double>(20);
     auto input = support::control_input(problem);
 
-    ControlGradient<double> serial(1, 1);
+    ControlGradient<double> serial(1);
     ControlGradientOutputT<double> serial_output;
     serial.run(input, serial_output);
 
-    ControlGradient<double> parallel(8, 4);
+    ControlGradient<double> parallel(8);
     ControlGradientOutputT<double> parallel_output;
     parallel.run(input, parallel_output);
     if (serial_output.loss != parallel_output.loss) {
@@ -33,40 +33,43 @@ int main() {
         }
     }
 
-    bool rejected = false;
-    try {
-        ControlGradientBatchInputT<double> batch_input;
-        batch_input.model = problem.model;
-        batch_input.terrain = problem.terrain;
-        std::vector<simulation::StateT<double>> initial(3, problem.initial);
-        std::vector<BaseStateT<double>> base(3 * problem.num_steps);
-        std::vector<math::Vector<double, 4>> torque(3 * problem.num_steps);
-        std::vector<simulation::LossSpecT<double>> losses(3, problem.loss);
-        for (std::size_t s = 0; s < 3; ++s) {
-            for (std::size_t k = 0; k < problem.num_steps; ++k) {
-                base[s * problem.num_steps + k] = problem.base[k];
-                torque[s * problem.num_steps + k] = problem.torque[k];
+    const std::size_t batch = 3;
+    ControlGradientBatchInputT<double> batch_input;
+    batch_input.model = problem.model;
+    batch_input.terrain = problem.terrain;
+    std::vector<simulation::StateT<double>> initial(batch, problem.initial);
+    std::vector<BaseStateT<double>> base(batch * problem.num_steps);
+    std::vector<math::Vector<double, 4>> torque(batch * problem.num_steps);
+    std::vector<simulation::LossSpecT<double>> losses(batch, problem.loss);
+    for (std::size_t s = 0; s < batch; ++s) {
+        for (std::size_t k = 0; k < problem.num_steps; ++k) {
+            base[s * problem.num_steps + k] = problem.base[k];
+            torque[s * problem.num_steps + k] = problem.torque[k];
+        }
+    }
+    batch_input.initial = initial.data();
+    batch_input.base = base.data();
+    batch_input.torque = torque.data();
+    batch_input.num_steps = problem.num_steps;
+    batch_input.spec = problem.spec;
+    batch_input.loss = losses.data();
+    ControlGradient<double> batch_handler(8);
+    ControlGradientBatchOutputT<double> batch_output;
+    batch_handler.runBatch(batch, batch_input, batch_output);
+    for (std::size_t s = 0; s < batch; ++s) {
+        for (std::size_t k = 0; k < problem.num_steps; ++k) {
+            for (int i = 0; i < 4; ++i) {
+                if (batch_output.gradient[s * problem.num_steps + k][i] !=
+                    serial_output.gradient[k][i]) {
+                    printf("批量结果与单样本不一致\n");
+                    return 1;
+                }
             }
         }
-        batch_input.initial = initial.data();
-        batch_input.base = base.data();
-        batch_input.torque = torque.data();
-        batch_input.num_steps = problem.num_steps;
-        batch_input.spec = problem.spec;
-        batch_input.loss = losses.data();
-        ControlGradient<double> limited(8, 2);
-        ControlGradientBatchOutputT<double> batch_output;
-        limited.runBatch(3, batch_input, batch_output);
-    } catch (const std::invalid_argument&) {
-        rejected = true;
-    }
-    if (!rejected) {
-        printf("超过最大批量未抛出异常\n");
-        return 1;
     }
 
     auto problem_float = support::make_problem<float>(20);
-    ControlGradient<float> float_handler(8, 4);
+    ControlGradient<float> float_handler(8);
     ControlGradientOutputT<float> float_output;
     float_handler.run(support::control_input(problem_float), float_output);
     const double loss_error =

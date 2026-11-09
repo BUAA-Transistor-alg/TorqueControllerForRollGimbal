@@ -8,8 +8,7 @@
 namespace gimbal_abi {
 
 struct ContextConfig {
-    int thread_count = 1;      // 含调用线程的总线程数
-    std::size_t max_batch = 1; // 批量模式允许的最大批量
+    int thread_count = 1;  // 含调用线程的总线程数
 };
 
 struct SingleStepInput {

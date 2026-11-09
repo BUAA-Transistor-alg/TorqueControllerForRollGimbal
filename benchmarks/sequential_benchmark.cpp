@@ -16,7 +16,6 @@ namespace {
 
 constexpr std::size_t kNumSteps = 20;
 constexpr int kThreads = 8;
-constexpr std::size_t kMaxBatch = 128;
 
 double now_microseconds() {
     return std::chrono::duration<double, std::micro>(
@@ -81,9 +80,9 @@ double run_rounds(Function&& function, int rounds, int calls) {
 }
 
 void benchmark_single() {
-    ControlGradient<double> gradient_handler(kThreads, 1);
-    ParameterSensitivity<double> sensitivity_handler(kThreads, 1);
-    ForwardSimulation<double> forward_handler(kThreads, 1);
+    ControlGradient<double> gradient_handler(kThreads);
+    ParameterSensitivity<double> sensitivity_handler(kThreads);
+    ForwardSimulation<double> forward_handler(kThreads);
     const double offset = 1e-3;
     SingleState state = build_state(offset);
     simulation::LossSpecT<double> loss = build_loss(state);
@@ -194,8 +193,8 @@ BatchState build_batch(std::size_t batch) {
 }
 
 void benchmark_batch(std::size_t batch) {
-    ControlGradient<double> gradient_handler(kThreads, kMaxBatch);
-    ParameterSensitivity<double> sensitivity_handler(kThreads, kMaxBatch);
+    ControlGradient<double> gradient_handler(kThreads);
+    ParameterSensitivity<double> sensitivity_handler(kThreads);
     BatchState state = build_batch(batch);
 
     ControlGradientBatchInputT<double> gradient_input;
@@ -216,8 +215,9 @@ void benchmark_batch(std::size_t batch) {
             for (std::size_t k = 0; k < kNumSteps; ++k) {
                 state.initial[s] = gradient_output.final_state[s];
                 for (int i = 0; i < 4; ++i) {
-                    state.torque[s * kNumSteps + k][i] +=
-                        1e-8 * gradient_output.gradient[s * kNumSteps + k][i];
+                    double& value = state.torque[s * kNumSteps + k][i];
+                    value += 1e-8 * gradient_output.gradient[s * kNumSteps + k][i];
+                    value = std::max(-0.4, std::min(0.4, value));
                 }
             }
         }
@@ -243,7 +243,9 @@ void benchmark_batch(std::size_t batch) {
             state.initial[s] = sensitivity_output.final_state[s];
             for (std::size_t k = 0; k < kNumSteps; ++k) {
                 for (int i = 0; i < 4; ++i) {
-                    state.torque[s * kNumSteps + k][i] += 1e-8 * static_cast<double>(i + 1);
+                    double& value = state.torque[s * kNumSteps + k][i];
+                    value += 1e-8 * static_cast<double>(i + 1);
+                    value = std::max(-0.4, std::min(0.4, value));
                 }
             }
         }
@@ -272,6 +274,7 @@ int main(int argc, char** argv) {
         benchmark_batch(8);
         benchmark_batch(32);
         benchmark_batch(128);
+        benchmark_batch(256);
     }
     return 0;
 }
