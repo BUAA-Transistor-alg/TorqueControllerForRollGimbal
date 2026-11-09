@@ -95,7 +95,10 @@ Real simulateAndGradientThreaded(const ModelParameters& model, const Terrain& te
                 detail::evaluate_stage_jacobians(stage_data[index], scalar_model);
         });
     const auto stage_visitor = [&](std::size_t stage_index, const detail::StageData&) {
-        pipeline.publish(stage_index);
+        // 每个子步的四个阶段一起发布，减少生产者与工作线程之间的缓存行争用
+        if ((stage_index & 3U) == 3U) {
+            pipeline.publish(stage_index);
+        }
     };
     const auto step_visitor = [](std::size_t, const simulation::State&) {};
     const Real loss_value = detail::simulate_trajectory(

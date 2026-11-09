@@ -7,16 +7,17 @@
 namespace gimbal {
 namespace detail {
 
+// 高频读写的原子量各自独占缓存行，避免生产者与工作线程的伪共享
 struct ThreadPool::Job {
     std::size_t count = 0;
     std::function<void(int, std::size_t, std::size_t)> parallel;
     std::function<void(int, std::size_t)> dynamic;
     std::function<void(std::size_t)> worker;
-    std::atomic<std::size_t> available{0};
-    std::atomic<std::size_t> claimed{0};
-    std::atomic<std::size_t> next{0};
-    std::atomic<bool> producer_done{false};
-    int pending = 0;
+    alignas(64) std::atomic<std::size_t> available{0};
+    alignas(64) std::atomic<std::size_t> claimed{0};
+    alignas(64) std::atomic<std::size_t> next{0};
+    alignas(64) std::atomic<bool> producer_done{false};
+    alignas(64) int pending = 0;
 };
 
 namespace {
@@ -168,7 +169,7 @@ void ThreadPool::parallel_for(
         }
         return;
     }
-    std::shared_ptr<Job> job = std::make_shared<Job>();
+    std::shared_ptr<Job> job(new Job());
     job->count = count;
     job->parallel = function;
     job->pending = participant_count();
@@ -205,7 +206,7 @@ void ThreadPool::parallel_dynamic(
         }
         return;
     }
-    std::shared_ptr<Job> job = std::make_shared<Job>();
+    std::shared_ptr<Job> job(new Job());
     job->count = count;
     job->dynamic = function;
     job->pending = participant_count();
@@ -235,7 +236,7 @@ void ThreadPool::parallel_dynamic(
 
 ThreadPool::Pipeline ThreadPool::start_pipeline(
     std::size_t count, const std::function<void(std::size_t)>& worker) {
-    std::shared_ptr<Job> job = std::make_shared<Job>();
+    std::shared_ptr<Job> job(new Job());
     job->count = count;
     job->worker = worker;
     job->pending = participant_count();
