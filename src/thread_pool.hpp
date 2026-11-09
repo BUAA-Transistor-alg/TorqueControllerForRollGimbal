@@ -36,11 +36,6 @@ public:
     int worker_count() const { return static_cast<int>(workers_.size()); }
     int participant_count() const { return worker_count() + 1; }
 
-    // 单样本流水线用的线程池（少量工作线程，避免生产者与工作线程争抢缓存行）
-    static ThreadPool& pool();
-    // 批量调用用的线程池（全部工作线程，样本级并行）
-    static ThreadPool& batch_pool();
-
     // 动态领取一段连续下标；chunk 控制每次领取的个数
     void parallel_dynamic(std::size_t count,
                           const std::function<void(int participant, std::size_t index)>& function,

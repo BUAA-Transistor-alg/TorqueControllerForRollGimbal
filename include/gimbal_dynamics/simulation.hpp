@@ -1,10 +1,7 @@
 #pragma once
 
 // 定步长前向仿真核心：4 个关节的 8 维状态、RK4 细化积分、标量轨迹损失。
-//
-// 对控制量求梯度的模块（gimbal::control_gradient）与对模型参数求灵敏度的模块
-// （gimbal::parameter_gradient）共用同一套内部前向积分循环（src/simulation_core.hpp），
-// 因此两者的前向轨迹、阶段状态与损失逐位一致。
+// 公开类型按精度模板化，后端在编译时按精度实例化。
 
 #include <cstddef>
 #include <vector>
@@ -16,64 +13,80 @@ namespace gimbal {
 namespace simulation {
 
 // 8 维状态：4 个关节角与 4 个关节角速度
-struct State {
-    math::Vector4d angle = math::Vector4d::zero();
-    math::Vector4d velocity = math::Vector4d::zero();
+template <typename Real>
+struct StateT {
+    math::Vector<Real, 4> angle = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> velocity = math::Vector<Real, 4>::zero();
 };
 
-// 标量轨迹损失（时间均值形式，与参考工程一致）：
+// 标量轨迹损失（时间均值形式）：
 //   L = 1/(2K) Σ_k [ Σ_i wa_i (q_i - q*_i)^2 + Σ_i wv_i (v_i - v*_i)^2
 //                    + Σ_i wt_i τ_{k,i}^2 ]
-// 角与角速度取每个主步末的状态；目标序列为 nullptr 时目标恒为 0。
-struct LossSpec {
-    math::Vector4d angle_weights = math::Vector4d::zero();
-    math::Vector4d velocity_weights = math::Vector4d::zero();
-    math::Vector4d torque_weights = math::Vector4d::zero();
-    const math::Vector4d* target_angle = nullptr;     // 长度 num_steps
-    const math::Vector4d* target_velocity = nullptr;  // 长度 num_steps
+template <typename Real>
+struct LossSpecT {
+    math::Vector<Real, 4> angle_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> velocity_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> torque_weights = math::Vector<Real, 4>::zero();
+    const math::Vector<Real, 4>* target_angle = nullptr;
+    const math::Vector<Real, 4>* target_velocity = nullptr;
 };
 
 // 定步长设置：每个主步内做 refinement 次经典 RK4
-struct TrajectorySpec {
-    Real step = 0.0;
+template <typename Real>
+struct TrajectorySpecT {
+    Real step = Real(0);
     int refinement = 1;
 };
 
-// 前向轨迹记录：每个主步末状态，以及每个 RK4 子步四个阶段的状态与底盘量
-struct Trace {
+// 前向轨迹记录
+template <typename Real>
+struct TraceT {
     std::size_t num_steps = 0;
     int refinement = 0;
-    std::vector<State> step_end;        // 长度 K
-    std::vector<State> stage_state;     // 长度 K*refinement*4
-    std::vector<BaseState> stage_base;  // 长度 K*refinement*4
+    std::vector<StateT<Real>> step_end;
+    std::vector<StateT<Real>> stage_state;
+    std::vector<BaseStateT<Real>> stage_base;
 
-    void resize(std::size_t steps, int refine);
-    void release();
+    void resize(std::size_t steps, int refine) {
+        num_steps = steps;
+        refinement = refine;
+        step_end.resize(steps);
+        stage_state.resize(steps * static_cast<std::size_t>(refine) * 4);
+        stage_base.resize(steps * static_cast<std::size_t>(refine) * 4);
+    }
+
+    void release() {
+        num_steps = 0;
+        refinement = 0;
+        step_end.clear();
+        stage_state.clear();
+        stage_base.clear();
+    }
 };
 
-// 配置校验。step 非正或非有限、refinement < 1、num_steps < 1、尺寸溢出时
-// 抛出 std::invalid_argument。
+// 后端内部按构建精度使用的别名
+using State = StateT<Real>;
+using LossSpec = LossSpecT<Real>;
+using TrajectorySpec = TrajectorySpecT<Real>;
+using Trace = TraceT<Real>;
+
+// 配置校验
 void validate(const TrajectorySpec& spec, std::size_t num_steps);
 
-// 单步状态导数 y' = f(y, u)，y = [q; q̇]，u = τ。用于与 forward_dynamics 对照。
-math::Vector8d state_derivative(const ModelParameters& model, const Terrain& terrain,
-                                const BaseState& base, const State& state,
-                                const math::Vector4d& torque);
+// 单步状态导数 y' = f(y, u)
+math::Vector<Real, 8> state_derivative(const ModelParameters& model, const Terrain& terrain,
+                                       const BaseState& base, const State& state,
+                                       const math::Vector<Real, 4>& torque);
 
-// 单步损失（已含 1/K 缩放）
-Real step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
-                 const State& state, const math::Vector4d& torque);
+Real step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step, const State& state,
+               const math::Vector<Real, 4>& torque);
 
-// 单步损失对状态的梯度，顺序为 4 个关节角、4 个关节角速度
-math::Vector8d step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
-                                  std::size_t step, const State& state);
+math::Vector<Real, 8> step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
+                                         std::size_t step, const State& state);
 
-// 前向积分。base 与 torque 的长度均为 num_steps；返回总损失并写满 trace。
-// 底盘量在第 k 个主步内按等角加速度外推：
-//   ψ(τ) = ψ_k + ψ̇_k τ + 1/2 ψ̈_k τ²，ψ̇(τ) = ψ̇_k + ψ̈_k τ，a0 保持不变。
 Real simulate(const ModelParameters& model, const Terrain& terrain, const State& initial,
-                const BaseState* base, const math::Vector4d* torque, std::size_t num_steps,
-                const TrajectorySpec& spec, const LossSpec& loss, Trace& trace);
+              const BaseState* base, const math::Vector<Real, 4>* torque, std::size_t num_steps,
+              const TrajectorySpec& spec, const LossSpec& loss, Trace& trace);
 
 }  // namespace simulation
 }  // namespace gimbal

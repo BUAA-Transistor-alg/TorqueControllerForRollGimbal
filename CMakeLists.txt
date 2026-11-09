@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(gimbal_dynamics STATIC
+set(GIMBAL_BACKEND_SOURCES
     src/dynamics_model.cpp
     src/simulation.cpp
     src/stage_data.cpp
@@ -17,19 +17,10 @@ add_library(gimbal_dynamics STATIC
     src/control_gradient.cpp
     src/parameter_gradient.cpp
     src/thread_pool.cpp
+    src/backend_runner.cpp
 )
-target_include_directories(gimbal_dynamics PUBLIC include PRIVATE src)
-target_compile_options(gimbal_dynamics PRIVATE -Wall -Wextra)
-target_link_libraries(gimbal_dynamics PUBLIC Threads::Threads)
 
-# 精度开关：默认 double；打开后内部计算改用 float，仅用于精度对照测量
-option(GIMBAL_REAL_FLOAT "内部计算精度切换为 float（仅用于精度对照测量）" OFF)
-if(GIMBAL_REAL_FLOAT)
-    target_compile_definitions(gimbal_dynamics PUBLIC GIMBAL_REAL_FLOAT)
-endif()
-
-# 热路径的向量化与展开选项：-mavx2 只影响本库的编译单元；
-# -ffp-contract=off 保证不引入 FMA，浮点运算顺序与结果保持不变。
+# 热路径的向量化与展开选项：只影响本库编译单元，不改变公开接口
 include(CheckCXXCompilerFlag)
 option(GIMBAL_VECTORIZE "为热路径开启 AVX2 向量化与展开选项" ON)
 set(GIMBAL_HOT_FLAGS "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3;-funroll-loops;-fno-math-errno>")
@@ -37,12 +28,29 @@ check_cxx_compiler_flag("-mavx2" GIMBAL_HAS_AVX2)
 if(GIMBAL_VECTORIZE AND GIMBAL_HAS_AVX2)
     list(APPEND GIMBAL_HOT_FLAGS "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-mavx2;-ffp-contract=off>")
 endif()
-target_compile_options(gimbal_dynamics PRIVATE ${GIMBAL_HOT_FLAGS})
+
+# 每个精度后端独立编译一份：双精度在 gimbal 命名空间，单精度在 gimbal_f 命名空间
+function(gimbal_add_backend target prefix)
+    add_library(${target} STATIC ${GIMBAL_BACKEND_SOURCES})
+    target_include_directories(${target} PUBLIC include PRIVATE src)
+    target_compile_options(${target} PRIVATE -Wall -Wextra ${GIMBAL_HOT_FLAGS})
+    target_link_libraries(${target} PUBLIC Threads::Threads)
+    target_compile_definitions(${target} PRIVATE GIMBAL_BACKEND_PREFIX=${prefix})
+endfunction()
+
+gimbal_add_backend(gimbal_backend_double gimbal_backend_double_)
+gimbal_add_backend(gimbal_backend_float gimbal_backend_float_)
+target_compile_definitions(gimbal_backend_float PRIVATE gimbal=gimbal_f GIMBAL_REAL_FLOAT)
+
+add_library(gimbal_dynamics INTERFACE)
+target_include_directories(gimbal_dynamics INTERFACE include)
+target_link_libraries(gimbal_dynamics INTERFACE gimbal_backend_double gimbal_backend_float)
 
 option(GIMBAL_DYNAMICS_BUILD_BENCHMARKS "构建基准程序" ON)
 if(GIMBAL_DYNAMICS_BUILD_BENCHMARKS)
     add_executable(sequential_benchmark benchmarks/sequential_benchmark.cpp)
     target_link_libraries(sequential_benchmark PRIVATE gimbal_dynamics)
+    target_include_directories(sequential_benchmark PRIVATE tests)
     target_compile_options(sequential_benchmark PRIVATE -Wall -Wextra)
 endif()
 

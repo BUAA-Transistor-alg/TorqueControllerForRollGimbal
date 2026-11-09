@@ -1,168 +1,119 @@
-// 并发调用检查：单样本与批量接口共用线程池时的串行化、结果一致性与无死锁。
-#include <atomic>
+// 校验：多个处理器实例从不同外部线程并发调用时结果与串行一致；
+// 批量调用与单样本调用逐位一致。
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <thread>
 #include <vector>
 
-#include "gimbal_dynamics/control_gradient.hpp"
-#include "gimbal_dynamics/parameter_gradient.hpp"
-#include "gimbal_dynamics/simulation.hpp"
+#include "gimbal_dynamics/handlers.hpp"
+#include "support.hpp"
+
+using namespace gimbal;
 
 namespace {
 
-using gimbal::Real;
-
-struct Inputs {
-    gimbal::ModelParameters model;
-    gimbal::Terrain terrain;
-    gimbal::simulation::State initial;
-    std::vector<gimbal::BaseState> base;
-    std::vector<gimbal::math::Vector4d> torque;
-    gimbal::simulation::LossSpec loss;
-    gimbal::simulation::TrajectorySpec spec;
-    std::vector<gimbal::math::Vector4d> target_angle;
-    std::vector<gimbal::math::Vector4d> target_velocity;
-    std::size_t num_steps = 20;
-};
-
-Inputs make_inputs() {
-    Inputs inputs;
-    inputs.model = gimbal::ModelParameters::demo();
-    inputs.terrain.slope_angle = 0.05;
-    inputs.terrain.slope_direction = 0.7;
-    inputs.initial.angle = gimbal::math::Vector4d::from(0.20, -0.10, 0.15, 0.05);
-    inputs.initial.velocity = gimbal::math::Vector4d::from(0.30, -0.20, 0.10, -0.05);
-    inputs.spec.step = 0.01;
-    inputs.spec.refinement = 2;
-    inputs.base.resize(inputs.num_steps);
-    inputs.torque.resize(inputs.num_steps);
-    inputs.target_angle.resize(inputs.num_steps);
-    inputs.target_velocity.resize(inputs.num_steps);
-    for (std::size_t k = 0; k < inputs.num_steps; ++k) {
-        const Real t = static_cast<Real>(k) * inputs.spec.step;
-        gimbal::BaseState& base = inputs.base[k];
-        base.yaw = 0.2 + 0.4 * t;
-        base.yaw_rate = 0.4;
-        base.yaw_acceleration = 0.3;
-        base.acceleration[0] = 0.2;
-        base.acceleration[1] = 0.15;
-        base.acceleration[2] = 0.05;
-        inputs.torque[k] = gimbal::math::Vector4d::from(0.20, -0.12, 0.06, -0.04);
+bool same_gradient(const std::vector<math::Vector<double, 4>>& a,
+                   const std::vector<math::Vector<double, 4>>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (std::size_t k = 0; k < a.size(); ++k) {
         for (int i = 0; i < 4; ++i) {
-            inputs.target_angle[k][i] = 0.10 * std::sin(0.5 * t + 0.7 * i);
-            inputs.target_velocity[k][i] = 0.20 * std::cos(0.3 * t + 0.4 * i);
+            if (a[k][i] != b[k][i]) {
+                return false;
+            }
         }
     }
-    inputs.loss.angle_weights = gimbal::math::Vector4d::from(1.0, 2.0, 0.8, 1.5);
-    inputs.loss.velocity_weights = gimbal::math::Vector4d::from(0.3, 0.5, 0.2, 0.4);
-    inputs.loss.torque_weights = gimbal::math::Vector4d::from(0.05, 0.05, 0.03, 0.03);
-    inputs.loss.target_angle = inputs.target_angle.data();
-    inputs.loss.target_velocity = inputs.target_velocity.data();
-    return inputs;
+    return true;
+}
+
+bool same_sensitivity(const math::Vector<double, parameters::kParameterCount>& a,
+                      const math::Vector<double, parameters::kParameterCount>& b) {
+    for (int i = 0; i < parameters::kParameterCount; ++i) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace
 
 int main() {
-    const Inputs inputs = make_inputs();
-    gimbal::control_gradient::Workspace reference_control;
-    std::vector<gimbal::math::Vector4d> reference_gradient(inputs.num_steps);
-    gimbal::parameter_gradient::Workspace reference_parameter;
-    gimbal::parameter_gradient::Gradient reference_sensitivity;
-    gimbal::control_gradient::simulateAndGradient(
-        inputs.model, inputs.terrain, inputs.initial, inputs.base.data(), inputs.torque.data(),
-        inputs.num_steps, inputs.spec, inputs.loss, reference_control, reference_gradient.data(),
-        nullptr);
-    gimbal::parameter_gradient::simulateAndSensitivity(
-        inputs.model, inputs.terrain, inputs.initial, inputs.base.data(), inputs.torque.data(),
-        inputs.num_steps, inputs.spec, inputs.loss, reference_parameter,
-        &reference_sensitivity, nullptr);
+    auto problem = support::make_problem<double>(12);
+    auto input = support::control_input(problem);
+    auto parameter_input = support::parameter_input(problem);
 
-    std::atomic<int> single_mismatch{0};
-    auto single_worker = [&] {
-        gimbal::control_gradient::Workspace control_workspace;
-        gimbal::parameter_gradient::Workspace parameter_workspace;
-        std::vector<gimbal::math::Vector4d> gradient(inputs.num_steps);
-        gimbal::parameter_gradient::Gradient sensitivity;
-        for (int iteration = 0; iteration < 40; ++iteration) {
-            gimbal::control_gradient::simulateAndGradient(
-                inputs.model, inputs.terrain, inputs.initial, inputs.base.data(),
-                inputs.torque.data(), inputs.num_steps, inputs.spec, inputs.loss,
-                control_workspace, gradient.data(), nullptr);
-            gimbal::parameter_gradient::simulateAndSensitivity(
-                inputs.model, inputs.terrain, inputs.initial, inputs.base.data(),
-                inputs.torque.data(), inputs.num_steps, inputs.spec, inputs.loss,
-                parameter_workspace, &sensitivity, nullptr);
-            for (std::size_t k = 0; k < inputs.num_steps; ++k) {
-                for (int i = 0; i < 4; ++i) {
-                    if (gradient[k][i] != reference_gradient[k][i]) {
-                        single_mismatch.fetch_add(1);
-                    }
-                }
-            }
-            for (int i = 0; i < gimbal::parameters::kParameterCount; ++i) {
-                if (sensitivity[i] != reference_sensitivity[i]) {
-                    single_mismatch.fetch_add(1);
-                }
-            }
-        }
-    };
-    std::vector<std::thread> single_threads;
-    for (int thread = 0; thread < 3; ++thread) {
-        single_threads.emplace_back(single_worker);
+    ControlGradient<double> reference(1, 1);
+    ControlGradientOutputT<double> reference_output;
+    reference.run(input, reference_output);
+    ParameterSensitivity<double> reference_parameter(1, 1);
+    ParameterSensitivityOutputT<double> reference_parameter_output;
+    reference_parameter.run(parameter_input, reference_parameter_output);
+
+    constexpr int kThreads = 3;
+    std::array<bool, kThreads> control_ok{};
+    std::array<bool, kThreads> parameter_ok{};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t] {
+            ControlGradient<double> handler(2, 1);
+            ControlGradientOutputT<double> output;
+            handler.run(input, output);
+            control_ok[t] = output.loss == reference_output.loss &&
+                            same_gradient(output.gradient, reference_output.gradient);
+            ParameterSensitivity<double> sensitivity(2, 1);
+            ParameterSensitivityOutputT<double> sensitivity_output;
+            sensitivity.run(parameter_input, sensitivity_output);
+            parameter_ok[t] = sensitivity_output.loss == reference_parameter_output.loss &&
+                              same_sensitivity(sensitivity_output.gradient,
+                                               reference_parameter_output.gradient);
+        });
     }
-    for (std::thread& thread : single_threads) {
+    for (std::thread& thread : threads) {
         thread.join();
+    }
+    for (int t = 0; t < kThreads; ++t) {
+        if (!control_ok[t] || !parameter_ok[t]) {
+            printf("并发调用结果与串行不一致\n");
+            return 1;
+        }
     }
 
     const std::size_t batch = 8;
-    std::vector<gimbal::simulation::State> initial_batch(batch, inputs.initial);
-    std::vector<gimbal::BaseState> base_batch(batch * inputs.num_steps);
-    std::vector<gimbal::math::Vector4d> torque_batch(batch * inputs.num_steps);
-    for (std::size_t sample = 0; sample < batch; ++sample) {
-        for (std::size_t k = 0; k < inputs.num_steps; ++k) {
-            base_batch[sample * inputs.num_steps + k] = inputs.base[k];
-            torque_batch[sample * inputs.num_steps + k] = inputs.torque[k];
+    std::vector<simulation::StateT<double>> initial(batch, problem.initial);
+    std::vector<BaseStateT<double>> base(batch * problem.num_steps);
+    std::vector<math::Vector<double, 4>> torque(batch * problem.num_steps);
+    std::vector<simulation::LossSpecT<double>> losses(batch, problem.loss);
+    for (std::size_t s = 0; s < batch; ++s) {
+        for (std::size_t k = 0; k < problem.num_steps; ++k) {
+            base[s * problem.num_steps + k] = problem.base[k];
+            torque[s * problem.num_steps + k] = problem.torque[k];
         }
     }
-    std::vector<gimbal::simulation::LossSpec> losses(batch, inputs.loss);
-    std::atomic<int> batch_mismatch{0};
-    auto batch_worker = [&] {
-        gimbal::control_gradient::BatchWorkspace workspace;
-        std::vector<gimbal::math::Vector4d> gradient(batch * inputs.num_steps);
-        std::vector<gimbal::simulation::State> final_state(batch);
-        for (int iteration = 0; iteration < 8; ++iteration) {
-            gimbal::control_gradient::simulateAndGradientBatch(
-                inputs.model, inputs.terrain, initial_batch.data(), base_batch.data(),
-                torque_batch.data(), batch, inputs.num_steps, inputs.spec, losses.data(),
-                workspace, gradient.data(), final_state.data());
-            for (std::size_t sample = 0; sample < batch; ++sample) {
-                for (std::size_t k = 0; k < inputs.num_steps; ++k) {
-                    for (int i = 0; i < 4; ++i) {
-                        if (gradient[sample * inputs.num_steps + k][i] !=
-                            reference_gradient[k][i]) {
-                            batch_mismatch.fetch_add(1);
-                        }
-                    }
-                }
-            }
+    ControlGradientBatchInputT<double> batch_input;
+    batch_input.model = problem.model;
+    batch_input.terrain = problem.terrain;
+    batch_input.initial = initial.data();
+    batch_input.base = base.data();
+    batch_input.torque = torque.data();
+    batch_input.num_steps = problem.num_steps;
+    batch_input.spec = problem.spec;
+    batch_input.loss = losses.data();
+    ControlGradient<double> batch_handler(4, batch);
+    ControlGradientBatchOutputT<double> batch_output;
+    batch_handler.runBatch(batch, batch_input, batch_output);
+    std::vector<math::Vector<double, 4>> sample_gradient(problem.num_steps);
+    for (std::size_t s = 0; s < batch; ++s) {
+        for (std::size_t k = 0; k < problem.num_steps; ++k) {
+            sample_gradient[k] = batch_output.gradient[s * problem.num_steps + k];
         }
-    };
-    std::vector<std::thread> batch_threads;
-    for (int thread = 0; thread < 2; ++thread) {
-        batch_threads.emplace_back(batch_worker);
+        if (!same_gradient(sample_gradient, reference_output.gradient)) {
+            printf("批量结果与单样本结果不一致\n");
+            return 1;
+        }
     }
-    for (std::thread& thread : batch_threads) {
-        thread.join();
-    }
-
-    printf("并发单样本不一致计数 %d，并发批量不一致计数 %d\n", single_mismatch.load(),
-           batch_mismatch.load());
-    if (single_mismatch.load() != 0 || batch_mismatch.load() != 0) {
-        printf("并发检查失败\n");
-        return 1;
-    }
-    printf("并发检查通过\n");
+    printf("并发与批量一致性校验通过\n");
     return 0;
 }

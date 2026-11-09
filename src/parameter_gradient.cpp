@@ -83,7 +83,8 @@ Real simulateAndSensitivityThreaded(const ModelParameters& model, const Terrain&
                                     const math::Vector4d* torque, std::size_t num_steps,
                                     const simulation::TrajectorySpec& spec,
                                     const simulation::LossSpec& loss, Workspace& workspace,
-                                    Gradient* gradient, simulation::State* final_state) {
+                                    Gradient* gradient, simulation::State* final_state,
+                                    detail::ThreadPool& pool) {
     simulation::validate(spec, num_steps);
     workspace.resize(num_steps, spec.refinement);
     const std::size_t refinement = static_cast<std::size_t>(spec.refinement);
@@ -109,7 +110,7 @@ Real simulateAndSensitivityThreaded(const ModelParameters& model, const Terrain&
         detail::evaluate_terrain_frame(detail::convert_terrain<Real>(terrain));
 
     // 一个子步作为一个任务：工作线程重算阶段中间量、求四个阶段 Jacobian、组装 W 与 P 并标记就绪
-    auto pipeline = detail::ThreadPool::pool().start_pipeline(
+    auto pipeline = pool.start_pipeline(
         substep_count, [stage_inputs, substep_ready, substep_propagations, substep_parameters, h,
                         &scalar_model, &terrain_frame](std::size_t substep) {
             detail::StageJacobians stage[4];
@@ -185,10 +186,9 @@ void Workspace::release() {
     trace.release();
 }
 
-void BatchWorkspace::resize(std::size_t batch) {
+void BatchWorkspace::resize(std::size_t batch, const detail::ThreadPool& pool) {
     (void)batch;
-    const std::size_t participants =
-        static_cast<std::size_t>(detail::ThreadPool::batch_pool().participant_count());
+    const std::size_t participants = static_cast<std::size_t>(pool.participant_count());
     if (workspaces.size() != participants) {
         workspaces.resize(participants);
     }
@@ -203,10 +203,11 @@ Real simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain
                             const math::Vector4d* torque, std::size_t num_steps,
                             const simulation::TrajectorySpec& spec,
                             const simulation::LossSpec& loss, Workspace& workspace,
-                            Gradient* gradient, simulation::State* final_state) {
-    if (detail::ThreadPool::pool().worker_count() > 0) {
+                            Gradient* gradient, simulation::State* final_state,
+                            detail::ThreadPool* pool) {
+    if (pool != nullptr && pool->worker_count() > 0) {
         return simulateAndSensitivityThreaded(model, terrain, initial, base, torque, num_steps,
-                                              spec, loss, workspace, gradient, final_state);
+                                              spec, loss, workspace, gradient, final_state, *pool);
     }
     return simulateAndSensitivitySerial(model, terrain, initial, base, torque, num_steps, spec,
                                         loss, workspace, gradient, final_state);
@@ -217,7 +218,8 @@ Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& te
                                  const math::Vector4d* torque, std::size_t batch,
                                  std::size_t num_steps, const simulation::TrajectorySpec& spec,
                                  const simulation::LossSpec* loss, BatchWorkspace& workspace,
-                                 Gradient* gradient, simulation::State* final_state) {
+                                 Gradient* gradient, simulation::State* final_state,
+                                 detail::ThreadPool& pool) {
     if (batch == 0) {
         return Real(0);
     }
@@ -225,12 +227,11 @@ Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& te
         throw std::invalid_argument("批量输入不能为空");
     }
     simulation::validate(spec, num_steps);
-    workspace.resize(batch);
+    workspace.resize(batch, pool);
     std::vector<Real> loss_values(batch);
-    const std::size_t participants =
-        static_cast<std::size_t>(detail::ThreadPool::batch_pool().participant_count());
+    const std::size_t participants = static_cast<std::size_t>(pool.participant_count());
     const std::size_t chunk = std::max<std::size_t>(1, batch / participants);
-    detail::ThreadPool::batch_pool().parallel_dynamic(
+    pool.parallel_dynamic(
         batch, [&](int participant, std::size_t sample) {
             Workspace& work = workspace.workspaces[static_cast<std::size_t>(participant)];
             const std::size_t offset = sample * num_steps;

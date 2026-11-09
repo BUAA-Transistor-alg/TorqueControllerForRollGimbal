@@ -23,47 +23,6 @@ struct ThreadPool::Job {
     alignas(64) int pending = 0;
 };
 
-namespace {
-
-int hardware_threads() {
-    const unsigned int hardware = std::thread::hardware_concurrency();
-    return hardware > 1 ? static_cast<int>(hardware) - 1 : 0;
-}
-
-// 未设置或非法返回 -1；合法值 n 表示总线程数，返回工作线程数 n-1
-int environment_threads(const char* name) {
-    const char* text = std::getenv(name);
-    if (text == nullptr) {
-        return -1;
-    }
-    char* end = nullptr;
-    const long value = std::strtol(text, &end, 10);
-    if (end == text || *end != '\0' || value < 1 || value > 4096) {
-        return -1;
-    }
-    return static_cast<int>(value) - 1;
-}
-
-int pipeline_worker_count() {
-    const int configured = environment_threads("GIMBAL_PIPELINE_THREADS");
-    if (configured >= 0) {
-        return configured;
-    }
-    const int available = hardware_threads();
-    const int limit = 7;
-    return available < limit ? available : limit;
-}
-
-int batch_worker_count() {
-    const int configured = environment_threads("GIMBAL_BATCH_THREADS");
-    if (configured >= 0) {
-        return configured;
-    }
-    return hardware_threads();
-}
-
-}  // namespace
-
 ThreadPool::ThreadPool(int worker_count) {
     const int count = worker_count < 0 ? 0 : std::min(worker_count, 4096);
     workers_.reserve(static_cast<std::size_t>(count));
@@ -83,16 +42,6 @@ ThreadPool::~ThreadPool() {
             worker.join();
         }
     }
-}
-
-ThreadPool& ThreadPool::pool() {
-    static ThreadPool instance(pipeline_worker_count());
-    return instance;
-}
-
-ThreadPool& ThreadPool::batch_pool() {
-    static ThreadPool instance(batch_worker_count());
-    return instance;
 }
 
 void ThreadPool::record_error(Job& job) noexcept {

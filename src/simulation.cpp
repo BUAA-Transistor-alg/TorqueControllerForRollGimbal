@@ -11,22 +11,6 @@
 namespace gimbal {
 namespace simulation {
 
-void Trace::resize(std::size_t steps, int refine) {
-    num_steps = steps;
-    refinement = refine;
-    step_end.resize(steps);
-    stage_state.resize(steps * static_cast<std::size_t>(refine) * 4);
-    stage_base.resize(steps * static_cast<std::size_t>(refine) * 4);
-}
-
-void Trace::release() {
-    num_steps = 0;
-    refinement = 0;
-    step_end.clear();
-    stage_state.clear();
-    stage_base.clear();
-}
-
 void validate(const TrajectorySpec& spec, std::size_t num_steps) {
     if (!(spec.step > 0.0) || !std::isfinite(spec.step)) {
         throw std::invalid_argument("主步长必须是大于 0 的有限值");

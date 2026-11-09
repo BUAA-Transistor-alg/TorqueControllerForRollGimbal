@@ -1,98 +1,92 @@
-// 线程数环境变量检查：GIMBAL_PIPELINE_THREADS=1 与 GIMBAL_BATCH_THREADS=1
-// 表示只用调用线程；单样本与批量结果必须逐位一致且不挂起。
+// 校验：处理器线程数与最大批量由构造参数决定，结果与串行一致；单精度与双精度结果接近。
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
+#include <stdexcept>
 #include <vector>
 
-#include "gimbal_dynamics/control_gradient.hpp"
-#include "gimbal_dynamics/parameter_gradient.hpp"
-#include "gimbal_dynamics/simulation.hpp"
+#include "gimbal_dynamics/handlers.hpp"
+#include "support.hpp"
+
+using namespace gimbal;
 
 int main() {
-    setenv("GIMBAL_PIPELINE_THREADS", "1", 1);
-    setenv("GIMBAL_BATCH_THREADS", "1", 1);
+    auto problem = support::make_problem<double>(20);
+    auto input = support::control_input(problem);
 
-    using namespace gimbal;
-    const std::size_t num_steps = 12;
-    const std::size_t batch = 4;
-    ModelParameters model = ModelParameters::demo();
-    Terrain terrain;
-    terrain.slope_angle = 0.05;
-    terrain.slope_direction = 0.7;
-    simulation::TrajectorySpec spec{0.01, 2};
-    simulation::State initial;
-    initial.angle = math::Vector4d::from(0.20, -0.10, 0.15, 0.05);
-    initial.velocity = math::Vector4d::from(0.30, -0.20, 0.10, -0.05);
-    std::vector<BaseState> base(batch * num_steps);
-    std::vector<math::Vector4d> torque(batch * num_steps);
-    std::vector<math::Vector4d> target_angle(num_steps);
-    std::vector<math::Vector4d> target_velocity(num_steps);
-    for (std::size_t k = 0; k < num_steps; ++k) {
-        const Real t = static_cast<Real>(k) * spec.step;
+    ControlGradient<double> serial(1, 1);
+    ControlGradientOutputT<double> serial_output;
+    serial.run(input, serial_output);
+
+    ControlGradient<double> parallel(8, 4);
+    ControlGradientOutputT<double> parallel_output;
+    parallel.run(input, parallel_output);
+    if (serial_output.loss != parallel_output.loss) {
+        printf("不同线程数损失不一致\n");
+        return 1;
+    }
+    for (std::size_t k = 0; k < problem.num_steps; ++k) {
         for (int i = 0; i < 4; ++i) {
-            target_angle[k][i] = 0.10 * std::sin(0.5 * t + 0.7 * i);
-            target_velocity[k][i] = 0.20 * std::cos(0.3 * t + 0.4 * i);
-        }
-        for (std::size_t sample = 0; sample < batch; ++sample) {
-            BaseState& b = base[sample * num_steps + k];
-            b.yaw = 0.2 + 0.4 * t;
-            b.yaw_rate = 0.4;
-            b.yaw_acceleration = 0.3;
-            b.acceleration[0] = 0.2;
-            b.acceleration[1] = 0.15;
-            b.acceleration[2] = 0.05;
-            torque[sample * num_steps + k] =
-                math::Vector4d::from(0.20, -0.12, 0.06, -0.04);
-        }
-    }
-    simulation::LossSpec loss;
-    loss.angle_weights = math::Vector4d::from(1.0, 2.0, 0.8, 1.5);
-    loss.velocity_weights = math::Vector4d::from(0.3, 0.5, 0.2, 0.4);
-    loss.torque_weights = math::Vector4d::from(0.05, 0.05, 0.03, 0.03);
-    loss.target_angle = target_angle.data();
-    loss.target_velocity = target_velocity.data();
-    std::vector<simulation::LossSpec> losses(batch, loss);
-    std::vector<simulation::State> initial_batch(batch, initial);
-
-    control_gradient::Workspace control_workspace;
-    std::vector<math::Vector4d> single_gradient(num_steps);
-    control_gradient::simulateAndGradient(model, terrain, initial, base.data(), torque.data(),
-                                          num_steps, spec, loss, control_workspace,
-                                          single_gradient.data(), nullptr);
-    parameter_gradient::Workspace parameter_workspace;
-    parameter_gradient::Gradient single_sensitivity;
-    parameter_gradient::simulateAndSensitivity(model, terrain, initial, base.data(),
-                                               torque.data(), num_steps, spec, loss,
-                                               parameter_workspace, &single_sensitivity,
-                                               nullptr);
-
-    control_gradient::BatchWorkspace batch_workspace;
-    std::vector<math::Vector4d> batch_gradient(batch * num_steps);
-    control_gradient::simulateAndGradientBatch(
-        model, terrain, initial_batch.data(), base.data(), torque.data(), batch, num_steps, spec,
-        losses.data(), batch_workspace, batch_gradient.data(), nullptr);
-    parameter_gradient::BatchWorkspace parameter_batch;
-    std::vector<parameter_gradient::Gradient> batch_sensitivity(batch);
-    parameter_gradient::simulateAndSensitivityBatch(
-        model, terrain, initial_batch.data(), base.data(), torque.data(), batch, num_steps, spec,
-        losses.data(), parameter_batch, batch_sensitivity.data(), nullptr);
-
-    bool ok = true;
-    for (std::size_t sample = 0; sample < batch; ++sample) {
-        for (std::size_t k = 0; k < num_steps; ++k) {
-            for (int i = 0; i < 4; ++i) {
-                if (batch_gradient[sample * num_steps + k][i] != single_gradient[k][i]) {
-                    ok = false;
-                }
-            }
-        }
-        for (int i = 0; i < parameters::kParameterCount; ++i) {
-            if (batch_sensitivity[sample][i] != single_sensitivity[i]) {
-                ok = false;
+            if (serial_output.gradient[k][i] != parallel_output.gradient[k][i]) {
+                printf("不同线程数梯度不一致\n");
+                return 1;
             }
         }
     }
-    printf("%s\n", ok ? "线程数环境变量检查通过" : "线程数环境变量检查失败");
-    return ok ? 0 : 1;
+
+    bool rejected = false;
+    try {
+        ControlGradientBatchInputT<double> batch_input;
+        batch_input.model = problem.model;
+        batch_input.terrain = problem.terrain;
+        std::vector<simulation::StateT<double>> initial(3, problem.initial);
+        std::vector<BaseStateT<double>> base(3 * problem.num_steps);
+        std::vector<math::Vector<double, 4>> torque(3 * problem.num_steps);
+        std::vector<simulation::LossSpecT<double>> losses(3, problem.loss);
+        for (std::size_t s = 0; s < 3; ++s) {
+            for (std::size_t k = 0; k < problem.num_steps; ++k) {
+                base[s * problem.num_steps + k] = problem.base[k];
+                torque[s * problem.num_steps + k] = problem.torque[k];
+            }
+        }
+        batch_input.initial = initial.data();
+        batch_input.base = base.data();
+        batch_input.torque = torque.data();
+        batch_input.num_steps = problem.num_steps;
+        batch_input.spec = problem.spec;
+        batch_input.loss = losses.data();
+        ControlGradient<double> limited(8, 2);
+        ControlGradientBatchOutputT<double> batch_output;
+        limited.runBatch(3, batch_input, batch_output);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        printf("超过最大批量未抛出异常\n");
+        return 1;
+    }
+
+    auto problem_float = support::make_problem<float>(20);
+    ControlGradient<float> float_handler(8, 4);
+    ControlGradientOutputT<float> float_output;
+    float_handler.run(support::control_input(problem_float), float_output);
+    const double loss_error =
+        std::fabs(static_cast<double>(float_output.loss) - static_cast<double>(serial_output.loss)) /
+        std::fabs(static_cast<double>(serial_output.loss));
+    double gradient_error = 0.0;
+    for (std::size_t k = 0; k < problem.num_steps; ++k) {
+        for (int i = 0; i < 4; ++i) {
+            gradient_error = std::max(
+                gradient_error,
+                std::fabs(static_cast<double>(float_output.gradient[k][i]) -
+                          static_cast<double>(serial_output.gradient[k][i])) /
+                    std::max(1.0, std::fabs(static_cast<double>(serial_output.gradient[k][i]))));
+        }
+    }
+    printf("单精度与双精度：损失相对偏差 %.3e，梯度最大相对偏差 %.3e\n", loss_error, gradient_error);
+    if (!(loss_error < 1e-5) || !(gradient_error < 1e-4)) {
+        printf("精度切换校验失败\n");
+        return 1;
+    }
+    printf("线程数与批量配置校验通过\n");
+    return 0;
 }

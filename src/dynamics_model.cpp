@@ -25,26 +25,11 @@ using Vector4d = Vector4<Real>;
 using Matrix4d = Matrix4<Real>;
 using Matrix34d = Matrix34<Real>;
 
-math::Vector3d vec3(Real x, Real y, Real z) {
-    math::Vector3d value;
+math::Vector<Real, 3> vec3(Real x, Real y, Real z) {
+    math::Vector<Real, 3> value;
     value[0] = x;
     value[1] = y;
     value[2] = z;
-    return value;
-}
-
-math::Matrix3d mat3(Real xx, Real xy, Real xz, Real yx, Real yy, Real yz, Real zx,
-                    Real zy, Real zz) {
-    math::Matrix3d value;
-    value(0, 0) = xx;
-    value(0, 1) = xy;
-    value(0, 2) = xz;
-    value(1, 0) = yx;
-    value(1, 1) = yy;
-    value(1, 2) = yz;
-    value(2, 0) = zx;
-    value(2, 1) = zy;
-    value(2, 2) = zz;
     return value;
 }
 
@@ -266,40 +251,6 @@ BiasResult evaluate_bias(const ModelParameters& model, const Terrain& terrain, c
 }
 
 }  // namespace
-
-ModelParameters ModelParameters::demo() {
-    ModelParameters model;
-    model.bodies = {{
-        BodyParameters{0.90, vec3(0.004, 0.002, 0.018),
-                       mat3(0.00140, 0.00002, 0.00003,
-                            0.00002, 0.00155, 0.00001,
-                            0.00003, 0.00001, 0.00110)},
-        BodyParameters{0.42, vec3(0.012, 0.003, 0.032),
-                       mat3(0.00028, 0.00001, 0.00002,
-                            0.00001, 0.00033, 0.00001,
-                            0.00002, 0.00001, 0.00021)},
-        BodyParameters{0.25, vec3(-0.004, -0.003, 0.022),
-                       mat3(0.00011, 0.000005, 0.000004,
-                            0.000005, 0.00014, 0.000003,
-                            0.000004, 0.000003, 0.00009)},
-        BodyParameters{0.55, vec3(0.008, 0.001, 0.026),
-                       mat3(0.00034, 0.00002, 0.00001,
-                            0.00002, 0.00039, 0.000015,
-                            0.00001, 0.000015, 0.00026)},
-    }};
-    model.joint_offsets = {{
-        vec3(0.0, 0.0, 0.045),
-        vec3(0.028, 0.0, 0.095),
-        vec3(0.0, 0.0, 0.072),
-        vec3(0.0, 0.0, 0.058),
-    }};
-    model.damping[0] = 0.020;
-    model.damping[1] = 0.015;
-    model.damping[2] = 0.010;
-    model.damping[3] = 0.008;
-    model.gravity = 9.81;
-    return model;
-}
 
 math::Vector4d forward_dynamics(const ModelParameters& model, const Terrain& terrain,
                                 const BaseState& base, const math::Vector4d& q,

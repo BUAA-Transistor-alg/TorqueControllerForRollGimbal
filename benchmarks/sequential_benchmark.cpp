@@ -1,257 +1,277 @@
-// 连续调用基准：K=20、refinement=2、step=0.01。
-// 单样本模式与批量模式都让相邻调用之间存在数据依赖（上一次的末状态与梯度作为下一次输入），
-// 单线程测量在批量模式下按参与者线程并行，统计平均每次调用与平均每个样本的用时。
-
+// 连续多次调用基准：K=20、refinement=2、step=0.01，前后两次调用具有数据依赖。
+// 用法：sequential_benchmark [single|batch]
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <string>
+#include <cstring>
 #include <vector>
 
-#include "gimbal_dynamics/control_gradient.hpp"
-#include "gimbal_dynamics/parameter_gradient.hpp"
-#include "gimbal_dynamics/simulation.hpp"
+#include "gimbal_dynamics/handlers.hpp"
+#include "support.hpp"
 
-using gimbal::Real;
+using namespace gimbal;
 
 namespace {
 
 constexpr std::size_t kNumSteps = 20;
-constexpr int kRefinement = 2;
-constexpr Real kStep = 0.01;
-constexpr int kCalls = 100;
+constexpr int kThreads = 8;
+constexpr std::size_t kMaxBatch = 128;
 
-struct Problem {
-    gimbal::ModelParameters model;
-    gimbal::Terrain terrain;
-    std::vector<gimbal::BaseState> base;
-    std::vector<gimbal::math::Vector4d> torque;
-    std::vector<gimbal::math::Vector4d> target_angle;
-    std::vector<gimbal::math::Vector4d> target_velocity;
-    gimbal::simulation::LossSpec loss;
-    gimbal::simulation::TrajectorySpec spec;
-    gimbal::simulation::State initial;
+double now_microseconds() {
+    return std::chrono::duration<double, std::micro>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+struct SingleState {
+    std::vector<BaseStateT<double>> base;
+    std::vector<math::Vector<double, 4>> torque;
+    std::vector<math::Vector<double, 4>> target_angle;
+    std::vector<math::Vector<double, 4>> target_velocity;
 };
 
-Problem make_problem() {
-    Problem problem;
-    problem.model = gimbal::ModelParameters::demo();
-    problem.terrain.slope_angle = 0.05;
-    problem.terrain.slope_direction = 0.7;
-    problem.initial.angle = gimbal::math::Vector4d::from(0.20, -0.10, 0.15, 0.05);
-    problem.initial.velocity = gimbal::math::Vector4d::from(0.30, -0.20, 0.10, -0.05);
-    problem.base.resize(kNumSteps);
-    problem.torque.resize(kNumSteps);
-    problem.target_angle.resize(kNumSteps);
-    problem.target_velocity.resize(kNumSteps);
+SingleState build_state(double offset) {
+    SingleState state;
+    state.base.resize(kNumSteps);
+    state.torque.resize(kNumSteps);
+    state.target_angle.resize(kNumSteps);
+    state.target_velocity.resize(kNumSteps);
     for (std::size_t k = 0; k < kNumSteps; ++k) {
-        const Real step_time = static_cast<Real>(k) * kStep;
-        gimbal::BaseState& base = problem.base[k];
-        base.yaw = 0.2 + 0.4 * step_time;
+        const double t = static_cast<double>(k) * 0.01;
+        BaseStateT<double>& base = state.base[k];
+        base.yaw = 0.2 + 0.4 * t;
         base.yaw_rate = 0.4;
         base.yaw_acceleration = 0.3;
         base.acceleration[0] = 0.2;
         base.acceleration[1] = 0.15;
         base.acceleration[2] = 0.05;
-        problem.torque[k] = gimbal::math::Vector4d::from(0.20, -0.12, 0.06, -0.04);
+        state.torque[k] =
+            math::Vector<double, 4>::from(0.20 + offset, -0.12, 0.06, -0.04);
         for (int i = 0; i < 4; ++i) {
-            problem.target_angle[k][i] = 0.10 * std::sin(0.5 * step_time + 0.7 * i);
-            problem.target_velocity[k][i] = 0.20 * std::cos(0.3 * step_time + 0.4 * i);
+            state.target_angle[k][i] = 0.10 * std::sin(0.5 * t + 0.7 * i);
+            state.target_velocity[k][i] = 0.20 * std::cos(0.3 * t + 0.4 * i);
         }
     }
-    problem.loss.angle_weights = gimbal::math::Vector4d::from(1.0, 2.0, 0.8, 1.5);
-    problem.loss.velocity_weights = gimbal::math::Vector4d::from(0.3, 0.5, 0.2, 0.4);
-    problem.loss.torque_weights = gimbal::math::Vector4d::from(0.05, 0.05, 0.03, 0.03);
-    problem.loss.target_angle = problem.target_angle.data();
-    problem.loss.target_velocity = problem.target_velocity.data();
-    problem.spec.step = kStep;
-    problem.spec.refinement = kRefinement;
-    return problem;
+    return state;
+}
+
+simulation::LossSpecT<double> build_loss(const SingleState& state) {
+    simulation::LossSpecT<double> loss;
+    loss.angle_weights = math::Vector<double, 4>::from(1.0, 2.0, 0.8, 1.5);
+    loss.velocity_weights = math::Vector<double, 4>::from(0.3, 0.5, 0.2, 0.4);
+    loss.torque_weights = math::Vector<double, 4>::from(0.05, 0.05, 0.03, 0.03);
+    loss.target_angle = state.target_angle.data();
+    loss.target_velocity = state.target_velocity.data();
+    return loss;
 }
 
 template <typename Function>
-Real measure_average(Function&& function) {
-    const auto begin = std::chrono::steady_clock::now();
-    for (int call = 0; call < kCalls; ++call) {
-        function();
+double run_rounds(Function&& function, int rounds, int calls) {
+    double best = 1e100;
+    for (int round = 0; round < rounds; ++round) {
+        const double start = now_microseconds();
+        for (int call = 0; call < calls; ++call) {
+            function();
+        }
+        const double elapsed = now_microseconds() - start;
+        best = std::min(best, elapsed / static_cast<double>(calls));
     }
-    const auto end = std::chrono::steady_clock::now();
-    const Real total = std::chrono::duration<Real, std::micro>(end - begin).count();
-    return total / static_cast<Real>(kCalls);
+    return best;
 }
 
-void run_single(const Problem& problem) {
-    {
-        gimbal::simulation::Trace trace;
-        gimbal::simulation::State state = problem.initial;
-        Real checksum = 0;
-        Real best = 1e9;
-        for (int batch = 0; batch < 4; ++batch) {
-            state = problem.initial;
-            best = std::min(best, measure_average([&] {
-                checksum += gimbal::simulation::simulate(
-                    problem.model, problem.terrain, state, problem.base.data(),
-                    problem.torque.data(), kNumSteps, problem.spec, problem.loss, trace);
-                state = trace.step_end.back();
-            }));
+void benchmark_single() {
+    ControlGradient<double> gradient_handler(kThreads, 1);
+    ParameterSensitivity<double> sensitivity_handler(kThreads, 1);
+    ForwardSimulation<double> forward_handler(kThreads, 1);
+    const double offset = 1e-3;
+    SingleState state = build_state(offset);
+    simulation::LossSpecT<double> loss = build_loss(state);
+    simulation::StateT<double> initial =
+        support::make_problem<double>(kNumSteps).initial;
+
+    auto run_gradient = [&] {
+        ControlGradientInputT<double> input;
+        input.model = ModelParametersT<double>::demo();
+        input.terrain.slope_angle = 0.05;
+        input.terrain.slope_direction = 0.7;
+        input.initial = initial;
+        input.base = state.base.data();
+        input.torque = state.torque.data();
+        input.num_steps = kNumSteps;
+        input.spec.step = 0.01;
+        input.spec.refinement = 2;
+        input.loss = loss;
+        ControlGradientOutputT<double> output;
+        gradient_handler.run(input, output);
+        initial = output.final_state;
+        for (std::size_t k = 0; k < kNumSteps; ++k) {
+            for (int i = 0; i < 4; ++i) {
+                state.torque[k][i] += 1e-8 * output.gradient[k][i];
+                state.torque[k][i] = std::max(-0.4, std::min(0.4, state.torque[k][i]));
+            }
         }
-        std::printf("单样本前向仿真      平均每次调用 %8.2f us（校验值 %.6f）\n", best,
-                    static_cast<double>(checksum));
-    }
-    {
-        gimbal::control_gradient::Workspace workspace;
-        std::vector<gimbal::math::Vector4d> torque(kNumSteps);
-        std::vector<gimbal::math::Vector4d> gradient(kNumSteps);
-        Real checksum = 0;
-        Real best = 1e9;
-        for (int batch = 0; batch < 4; ++batch) {
-            gimbal::simulation::State state = problem.initial;
-            torque = problem.torque;
-            best = std::min(best, measure_average([&] {
-                checksum += gimbal::control_gradient::simulateAndGradient(
-                    problem.model, problem.terrain, state, problem.base.data(), torque.data(),
-                    kNumSteps, problem.spec, problem.loss, workspace, gradient.data(), &state);
-                for (std::size_t k = 0; k < kNumSteps; ++k) {
-                    for (int i = 0; i < 4; ++i) {
-                        torque[k][i] += 1e-6 * gradient[k][i];
-                    }
-                }
-            }));
+    };
+    auto run_sensitivity = [&] {
+        ParameterSensitivityInputT<double> input;
+        input.model = ModelParametersT<double>::demo();
+        input.terrain.slope_angle = 0.05;
+        input.terrain.slope_direction = 0.7;
+        input.initial = initial;
+        input.base = state.base.data();
+        input.torque = state.torque.data();
+        input.num_steps = kNumSteps;
+        input.spec.step = 0.01;
+        input.spec.refinement = 2;
+        input.loss = loss;
+        ParameterSensitivityOutputT<double> output;
+        sensitivity_handler.run(input, output);
+        initial = output.final_state;
+        for (std::size_t k = 0; k < kNumSteps; ++k) {
+            for (int i = 0; i < 4; ++i) {
+                state.torque[k][i] += 1e-8 * static_cast<double>(i + 1);
+            }
         }
-        std::printf("单样本控制量梯度    平均每次调用 %8.2f us（校验值 %.6f）\n", best,
-                    static_cast<double>(checksum));
-    }
-    {
-        gimbal::parameter_gradient::Workspace workspace;
-        gimbal::parameter_gradient::Gradient gradient;
-        std::vector<gimbal::math::Vector4d> torque(kNumSteps);
-        Real checksum = 0;
-        Real best = 1e9;
-        for (int batch = 0; batch < 4; ++batch) {
-            gimbal::simulation::State state = problem.initial;
-            torque = problem.torque;
-            best = std::min(best, measure_average([&] {
-                checksum += gimbal::parameter_gradient::simulateAndSensitivity(
-                    problem.model, problem.terrain, state, problem.base.data(), torque.data(),
-                    kNumSteps, problem.spec, problem.loss, workspace, &gradient, &state);
-                for (std::size_t k = 0; k < kNumSteps; ++k) {
-                    for (int i = 0; i < 4; ++i) {
-                        // 参数灵敏度与力矩不同量纲，这里只制造小的固定扰动
-                        torque[k][i] += 1e-8 * static_cast<Real>(i + 1);
-                    }
-                }
-            }));
-        }
-        std::printf("单样本参数灵敏度    平均每次调用 %8.2f us（校验值 %.6f）\n", best,
-                    static_cast<double>(checksum));
-    }
+    };
+    auto run_forward = [&] {
+        ForwardInputT<double> input;
+        input.model = ModelParametersT<double>::demo();
+        input.terrain.slope_angle = 0.05;
+        input.terrain.slope_direction = 0.7;
+        input.initial = initial;
+        input.base = state.base.data();
+        input.torque = state.torque.data();
+        input.num_steps = kNumSteps;
+        input.spec.step = 0.01;
+        input.spec.refinement = 2;
+        input.loss = loss;
+        ForwardOutputT<double> output;
+        forward_handler.run(input, output);
+        initial = output.step_end.back();
+    };
+
+    const double forward_time = run_rounds(run_forward, 4, 100);
+    const double gradient_time = run_rounds(run_gradient, 4, 100);
+    const double sensitivity_time = run_rounds(run_sensitivity, 4, 100);
+    printf("单样本前向仿真   平均每次调用 %8.2f us\n", forward_time);
+    printf("单样本控制量梯度 平均每次调用 %8.2f us\n", gradient_time);
+    printf("单样本参数灵敏度 平均每次调用 %8.2f us\n", sensitivity_time);
 }
 
-void run_batch(const Problem& problem, std::size_t batch) {
-    const std::size_t total = batch * kNumSteps;
-    {
-        gimbal::control_gradient::BatchWorkspace workspace;
-        std::vector<gimbal::simulation::State> initial(batch, problem.initial);
-        std::vector<gimbal::simulation::State> final_state(batch);
-        std::vector<gimbal::BaseState> base(total);
-        std::vector<gimbal::math::Vector4d> torque(total);
-        std::vector<gimbal::math::Vector4d> gradient(total);
-        std::vector<gimbal::simulation::LossSpec> losses(batch, problem.loss);
+struct BatchState {
+    std::vector<simulation::StateT<double>> initial;
+    std::vector<BaseStateT<double>> base;
+    std::vector<math::Vector<double, 4>> torque;
+    std::vector<simulation::LossSpecT<double>> losses;
+    std::vector<math::Vector<double, 4>> target_angle;
+    std::vector<math::Vector<double, 4>> target_velocity;
+};
+
+BatchState build_batch(std::size_t batch) {
+    BatchState state;
+    auto single = support::make_problem<double>(kNumSteps);
+    state.initial.resize(batch, single.initial);
+    state.base.resize(batch * kNumSteps);
+    state.torque.resize(batch * kNumSteps);
+    state.target_angle = single.target_angle;
+    state.target_velocity = single.target_velocity;
+    state.losses.resize(batch, single.loss);
+    for (std::size_t s = 0; s < batch; ++s) {
+        for (std::size_t k = 0; k < kNumSteps; ++k) {
+            const double t = static_cast<double>(k) * 0.01;
+            BaseStateT<double>& base = state.base[s * kNumSteps + k];
+            base.yaw = 0.2 + 0.4 * t;
+            base.yaw_rate = 0.4;
+            base.yaw_acceleration = 0.3;
+            base.acceleration[0] = 0.2;
+            base.acceleration[1] = 0.15;
+            base.acceleration[2] = 0.05;
+            state.torque[s * kNumSteps + k] =
+                math::Vector<double, 4>::from(0.20, -0.12, 0.06, -0.04);
+        }
+    }
+    return state;
+}
+
+void benchmark_batch(std::size_t batch) {
+    ControlGradient<double> gradient_handler(kThreads, kMaxBatch);
+    ParameterSensitivity<double> sensitivity_handler(kThreads, kMaxBatch);
+    BatchState state = build_batch(batch);
+
+    ControlGradientBatchInputT<double> gradient_input;
+    gradient_input.model = ModelParametersT<double>::demo();
+    gradient_input.terrain.slope_angle = 0.05;
+    gradient_input.terrain.slope_direction = 0.7;
+    gradient_input.initial = state.initial.data();
+    gradient_input.base = state.base.data();
+    gradient_input.torque = state.torque.data();
+    gradient_input.num_steps = kNumSteps;
+    gradient_input.spec.step = 0.01;
+    gradient_input.spec.refinement = 2;
+    gradient_input.loss = state.losses.data();
+    ControlGradientBatchOutputT<double> gradient_output;
+    auto run_gradient = [&] {
+        gradient_handler.runBatch(batch, gradient_input, gradient_output);
         for (std::size_t s = 0; s < batch; ++s) {
             for (std::size_t k = 0; k < kNumSteps; ++k) {
-                base[s * kNumSteps + k] = problem.base[k];
-                torque[s * kNumSteps + k] = problem.torque[k];
-            }
-        }
-        Real checksum = 0;
-        Real best = 1e9;
-        for (int round = 0; round < 4; ++round) {
-            for (std::size_t s = 0; s < batch; ++s) {
-                initial[s] = problem.initial;
-                for (std::size_t k = 0; k < kNumSteps; ++k) {
-                    torque[s * kNumSteps + k] = problem.torque[k];
+                state.initial[s] = gradient_output.final_state[s];
+                for (int i = 0; i < 4; ++i) {
+                    state.torque[s * kNumSteps + k][i] +=
+                        1e-8 * gradient_output.gradient[s * kNumSteps + k][i];
                 }
             }
-            best = std::min(best, measure_average([&] {
-                checksum += gimbal::control_gradient::simulateAndGradientBatch(
-                    problem.model, problem.terrain, initial.data(), base.data(), torque.data(),
-                    batch, kNumSteps, problem.spec, losses.data(), workspace, gradient.data(),
-                    final_state.data());
-                for (std::size_t s = 0; s < batch; ++s) {
-                    initial[s] = final_state[s];
-                    for (std::size_t k = 0; k < kNumSteps; ++k) {
-                        for (int i = 0; i < 4; ++i) {
-                            torque[s * kNumSteps + k][i] +=
-                                1e-6 * gradient[s * kNumSteps + k][i];
-                        }
-                    }
-                }
-            }));
         }
-        std::printf("批量 %3zu 控制量梯度  每次调用 %9.2f us，平均每个样本 %7.3f us（校验值 %.6f）\n",
-                    batch, best, best / static_cast<Real>(batch),
-                    static_cast<double>(checksum));
-    }
-    {
-        gimbal::parameter_gradient::BatchWorkspace workspace;
-        std::vector<gimbal::simulation::State> initial(batch, problem.initial);
-        std::vector<gimbal::simulation::State> final_state(batch);
-        std::vector<gimbal::BaseState> base(total);
-        std::vector<gimbal::math::Vector4d> torque(total);
-        std::vector<gimbal::parameter_gradient::Gradient> gradients(batch);
-        std::vector<gimbal::simulation::LossSpec> losses(batch, problem.loss);
+        gradient_input.torque = state.torque.data();
+        gradient_input.initial = state.initial.data();
+    };
+
+    ParameterSensitivityBatchInputT<double> sensitivity_input;
+    sensitivity_input.model = ModelParametersT<double>::demo();
+    sensitivity_input.terrain.slope_angle = 0.05;
+    sensitivity_input.terrain.slope_direction = 0.7;
+    sensitivity_input.initial = state.initial.data();
+    sensitivity_input.base = state.base.data();
+    sensitivity_input.torque = state.torque.data();
+    sensitivity_input.num_steps = kNumSteps;
+    sensitivity_input.spec.step = 0.01;
+    sensitivity_input.spec.refinement = 2;
+    sensitivity_input.loss = state.losses.data();
+    ParameterSensitivityBatchOutputT<double> sensitivity_output;
+    auto run_sensitivity = [&] {
+        sensitivity_handler.runBatch(batch, sensitivity_input, sensitivity_output);
         for (std::size_t s = 0; s < batch; ++s) {
+            state.initial[s] = sensitivity_output.final_state[s];
             for (std::size_t k = 0; k < kNumSteps; ++k) {
-                base[s * kNumSteps + k] = problem.base[k];
-                torque[s * kNumSteps + k] = problem.torque[k];
-            }
-        }
-        Real checksum = 0;
-        Real best = 1e9;
-        for (int round = 0; round < 4; ++round) {
-            for (std::size_t s = 0; s < batch; ++s) {
-                initial[s] = problem.initial;
-                for (std::size_t k = 0; k < kNumSteps; ++k) {
-                    torque[s * kNumSteps + k] = problem.torque[k];
+                for (int i = 0; i < 4; ++i) {
+                    state.torque[s * kNumSteps + k][i] += 1e-8 * static_cast<double>(i + 1);
                 }
             }
-            best = std::min(best, measure_average([&] {
-                checksum += gimbal::parameter_gradient::simulateAndSensitivityBatch(
-                    problem.model, problem.terrain, initial.data(), base.data(), torque.data(),
-                    batch, kNumSteps, problem.spec, losses.data(), workspace, gradients.data(),
-                    final_state.data());
-                for (std::size_t s = 0; s < batch; ++s) {
-                    initial[s] = final_state[s];
-                    for (std::size_t k = 0; k < kNumSteps; ++k) {
-                        for (int i = 0; i < 4; ++i) {
-                            // 参数灵敏度与力矩不同量纲，这里只制造小的固定扰动
-                            torque[s * kNumSteps + k][i] +=
-                                1e-8 * static_cast<Real>(i + 1);
-                        }
-                    }
-                }
-            }));
         }
-        std::printf("批量 %3zu 参数灵敏度  每次调用 %9.2f us，平均每个样本 %7.3f us（校验值 %.6f）\n",
-                    batch, best, best / static_cast<Real>(batch),
-                    static_cast<double>(checksum));
-    }
+        sensitivity_input.initial = state.initial.data();
+    };
+
+    const double gradient_time = run_rounds(run_gradient, 3, 30);
+    const double sensitivity_time = run_rounds(run_sensitivity, 3, 30);
+    printf("批量 %3zu 控制量梯度 每次调用 %9.2f us，平均每个样本 %8.2f us（校验值 %.6f）\n",
+           batch, gradient_time, gradient_time / static_cast<double>(batch),
+           static_cast<double>(gradient_output.mean_loss));
+    printf("批量 %3zu 参数灵敏度 每次调用 %9.2f us，平均每个样本 %8.2f us（校验值 %.6f）\n",
+           batch, sensitivity_time, sensitivity_time / static_cast<double>(batch),
+           static_cast<double>(sensitivity_output.mean_loss));
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    const Problem problem = make_problem();
-    const bool single_only = (argc > 1 && std::string(argv[1]) == "single");
-    const bool batch_only = (argc > 1 && std::string(argv[1]) == "batch");
-    if (!batch_only) {
-        run_single(problem);
+    const bool single = argc < 2 || std::strcmp(argv[1], "single") == 0;
+    const bool batch = argc < 2 || std::strcmp(argv[1], "batch") == 0;
+    if (single) {
+        benchmark_single();
     }
-    if (!single_only) {
-        for (std::size_t batch : {8U, 32U, 128U}) {
-            run_batch(problem, batch);
-        }
+    if (batch) {
+        benchmark_batch(8);
+        benchmark_batch(32);
+        benchmark_batch(128);
     }
     return 0;
 }
