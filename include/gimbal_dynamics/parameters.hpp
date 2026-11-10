@@ -19,7 +19,7 @@
 
 #include "gimbal_dynamics/dynamics_model.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace parameters {
 
 inline constexpr int kBodyCount = 4;
@@ -144,4 +144,4 @@ inline const char* const* names() {
 }
 
 }  // namespace parameters
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

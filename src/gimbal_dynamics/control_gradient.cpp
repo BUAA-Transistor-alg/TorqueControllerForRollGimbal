@@ -6,13 +6,13 @@
 #include <stdexcept>
 #include <vector>
 
-#include "model_evaluation.hpp"
-#include "simulation_core.hpp"
-#include "stage_data.hpp"
-#include "stage_jacobians.hpp"
-#include "thread_pool.hpp"
+#include "gimbal_dynamics/model_evaluation.hpp"
+#include "gimbal_dynamics/simulation_core.hpp"
+#include "gimbal_dynamics/stage_data.hpp"
+#include "gimbal_dynamics/stage_jacobians.hpp"
+#include "gimbal_dynamics/thread_pool.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace control_gradient {
 namespace {
 
@@ -217,4 +217,4 @@ Real simulateAndGradientBatch(const ModelParameters& model, const Terrain& terra
 }
 
 }  // namespace control_gradient
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

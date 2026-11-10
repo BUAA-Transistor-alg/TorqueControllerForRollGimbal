@@ -1,8 +1,8 @@
-#include "stage_data.hpp"
+#include "gimbal_dynamics/stage_data.hpp"
 
-#include "model_evaluation.hpp"
+#include "gimbal_dynamics/model_evaluation.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace detail {
 
 void evaluate_stage_data(const ScalarModelParameters<Real>& model,
@@ -25,4 +25,4 @@ void evaluate_stage_data(const ScalarModelParameters<Real>& model,
 }
 
 }  // namespace detail
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

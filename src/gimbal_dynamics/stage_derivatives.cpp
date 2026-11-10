@@ -1,11 +1,11 @@
-#include "stage_jacobians.hpp"
+#include "gimbal_dynamics/stage_jacobians.hpp"
 
 #include <array>
 #include <stdexcept>
 
-#include "model_evaluation.hpp"
+#include "gimbal_dynamics/model_evaluation.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace detail {
 namespace {
 
@@ -879,7 +879,7 @@ ParameterJacobian evaluate_parameter_jacobian(const StageData& stage,
 }
 
 }  // namespace detail
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics
 
 
 

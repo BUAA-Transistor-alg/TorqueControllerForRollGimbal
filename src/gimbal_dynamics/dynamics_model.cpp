@@ -3,9 +3,9 @@
 #include <array>
 #include <stdexcept>
 
-#include "model_evaluation.hpp"
+#include "gimbal_dynamics/model_evaluation.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace {
 
 template <typename Scalar>
@@ -260,4 +260,4 @@ math::Vector4d forward_dynamics(const ModelParameters& model, const Terrain& ter
     return detail::solve_mass(bias.terms.mass, right_hand_side);
 }
 
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

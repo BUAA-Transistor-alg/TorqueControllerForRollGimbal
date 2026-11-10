@@ -6,7 +6,7 @@
 
 #include "gimbal_dynamics/math_types.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 
 // 单个刚体的惯性参数
 template <typename Real>
@@ -103,4 +103,4 @@ math::Vector<Real, 4> forward_dynamics(const ModelParameters& model, const Terra
                                        const math::Vector<Real, 4>& qdot,
                                        const math::Vector<Real, 4>& torque);
 
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

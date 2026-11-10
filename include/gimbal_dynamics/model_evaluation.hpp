@@ -18,7 +18,7 @@
 #include "gimbal_dynamics/dynamics_model.hpp"
 #include "gimbal_dynamics/math_types.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace detail {
 
 template <typename Scalar>
@@ -129,7 +129,7 @@ Matrix3<Scalar> local_rotation(int joint, const Scalar& angle) {
 }
 
 // 标量泛化的模型参数。字段名与 ModelParameters 一致，
-// 从而 gimbal::parameters::add_parameter 对两者通用。
+// 从而 tcrg::gimbal_dynamics::parameters::add_parameter 对两者通用。
 template <typename Scalar>
 struct ScalarBodyParameters {
     Scalar mass = Scalar(0);
@@ -464,5 +464,5 @@ StateVector<Scalar> evaluate_derivative(const ScalarModelParameters<Scalar>& mod
 }
 
 }  // namespace detail
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics
 

@@ -9,7 +9,7 @@
 #include "gimbal_dynamics/dynamics_model.hpp"
 #include "gimbal_dynamics/math_types.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace simulation {
 
 // 8 维状态：4 个关节角与 4 个关节角速度
@@ -89,4 +89,4 @@ Real simulate(const ModelParameters& model, const Terrain& terrain, const State&
               const TrajectorySpec& spec, const LossSpec& loss, Trace& trace);
 
 }  // namespace simulation
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

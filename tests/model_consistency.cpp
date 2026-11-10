@@ -6,7 +6,7 @@
 
 #include "gimbal_dynamics/handlers.hpp"
 
-using namespace gimbal;
+using namespace tcrg::gimbal_dynamics;
 
 namespace {
 

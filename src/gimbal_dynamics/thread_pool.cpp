@@ -1,11 +1,11 @@
-#include "thread_pool.hpp"
+#include "gimbal_dynamics/thread_pool.hpp"
 
 #include <algorithm>
 #include <cstdlib>
 #include <stdexcept>
 #include <thread>
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace detail {
 
 // 高频读写的原子量各自独占缓存行，避免生产者与工作线程的伪共享
@@ -309,4 +309,4 @@ void ThreadPool::Pipeline::finish() {
 }
 
 }  // namespace detail
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

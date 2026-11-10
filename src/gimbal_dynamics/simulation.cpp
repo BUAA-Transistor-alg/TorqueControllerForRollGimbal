@@ -4,11 +4,11 @@
 #include <limits>
 #include <stdexcept>
 
-#include "model_evaluation.hpp"
-#include "simulation_core.hpp"
-#include "stage_data.hpp"
+#include "gimbal_dynamics/model_evaluation.hpp"
+#include "gimbal_dynamics/simulation_core.hpp"
+#include "gimbal_dynamics/stage_data.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace simulation {
 
 void validate(const TrajectorySpec& spec, std::size_t num_steps) {
@@ -79,4 +79,4 @@ Real simulate(const ModelParameters& model, const Terrain& terrain, const State&
 }
 
 }  // namespace simulation
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

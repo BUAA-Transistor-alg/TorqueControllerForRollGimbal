@@ -20,7 +20,7 @@
 #include <thread>
 #include <vector>
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace detail {
 
 class ThreadPool {
@@ -80,4 +80,4 @@ private:
 };
 
 }  // namespace detail
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

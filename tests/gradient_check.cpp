@@ -8,7 +8,7 @@
 #include "gimbal_dynamics/parameters.hpp"
 #include "support.hpp"
 
-using namespace gimbal;
+using namespace tcrg::gimbal_dynamics;
 
 namespace {
 

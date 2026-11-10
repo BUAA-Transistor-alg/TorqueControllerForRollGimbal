@@ -9,15 +9,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(GIMBAL_BACKEND_SOURCES
-    src/dynamics_model.cpp
-    src/simulation.cpp
-    src/stage_data.cpp
-    src/stage_derivatives.cpp
-    src/stage_jacobians.cpp
-    src/control_gradient.cpp
-    src/parameter_gradient.cpp
-    src/thread_pool.cpp
-    src/backend_runner.cpp
+    src/gimbal_dynamics/dynamics_model.cpp
+    src/gimbal_dynamics/simulation.cpp
+    src/gimbal_dynamics/stage_data.cpp
+    src/gimbal_dynamics/stage_derivatives.cpp
+    src/gimbal_dynamics/stage_jacobians.cpp
+    src/gimbal_dynamics/control_gradient.cpp
+    src/gimbal_dynamics/parameter_gradient.cpp
+    src/gimbal_dynamics/thread_pool.cpp
+    src/gimbal_dynamics/backend_runner.cpp
 )
 
 # 热路径的向量化与展开选项：只影响本库编译单元，不改变公开接口
@@ -29,18 +29,18 @@ if(GIMBAL_VECTORIZE AND GIMBAL_HAS_AVX2)
     list(APPEND GIMBAL_HOT_FLAGS "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-mavx2;-ffp-contract=off>")
 endif()
 
-# 每个精度后端独立编译一份：双精度在 gimbal 命名空间，单精度在 gimbal_f 命名空间
+# 每个精度后端独立编译一份：双精度在 tcrg::gimbal_dynamics，单精度在 tcrg_f::gimbal_dynamics
 function(gimbal_add_backend target prefix)
     add_library(${target} STATIC ${GIMBAL_BACKEND_SOURCES})
-    target_include_directories(${target} PUBLIC include PRIVATE src)
+    target_include_directories(${target} PUBLIC include)
     target_compile_options(${target} PRIVATE -Wall -Wextra ${GIMBAL_HOT_FLAGS})
     target_link_libraries(${target} PUBLIC Threads::Threads)
     target_compile_definitions(${target} PRIVATE GIMBAL_BACKEND_PREFIX=${prefix})
 endfunction()
 
-gimbal_add_backend(gimbal_backend_double gimbal_backend_double_)
-gimbal_add_backend(gimbal_backend_float gimbal_backend_float_)
-target_compile_definitions(gimbal_backend_float PRIVATE gimbal=gimbal_f GIMBAL_REAL_FLOAT)
+gimbal_add_backend(gimbal_backend_double tcrg_backend_double_)
+gimbal_add_backend(gimbal_backend_float tcrg_backend_float_)
+target_compile_definitions(gimbal_backend_float PRIVATE tcrg=tcrg_f GIMBAL_REAL_FLOAT)
 
 add_library(gimbal_dynamics INTERFACE)
 target_include_directories(gimbal_dynamics INTERFACE include)

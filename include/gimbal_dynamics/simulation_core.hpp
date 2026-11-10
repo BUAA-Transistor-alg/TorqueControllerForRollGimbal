@@ -16,9 +16,9 @@
 #include "gimbal_dynamics/dynamics_model.hpp"
 #include "gimbal_dynamics/math_types.hpp"
 #include "gimbal_dynamics/simulation.hpp"
-#include "stage_data.hpp"
+#include "gimbal_dynamics/stage_data.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace detail {
 
 // 主步内底盘量按等角加速度外推，线加速度保持不变
@@ -274,4 +274,4 @@ Real simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
 }
 
 }  // namespace detail
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

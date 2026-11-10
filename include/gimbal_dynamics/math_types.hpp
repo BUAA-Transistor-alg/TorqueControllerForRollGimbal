@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <type_traits>
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 
 // 后端内部标量：双精度后端为 double；单精度后端在编译选项中定义 GIMBAL_REAL_FLOAT。
 // 公开处理器用模板参数选择精度，使用方不需要关心这个宏。
@@ -20,7 +20,7 @@ using Real = double;
 
 namespace math {
 
-using Real = gimbal::Real;
+using Real = tcrg::gimbal_dynamics::Real;
 
 template <typename Scalar, int N>
 struct Vector {
@@ -427,4 +427,4 @@ inline Vector4<Real> solve4(const Matrix4<Real>& mass, const Vector4<Real>& rhs)
 }
 
 }  // namespace math
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

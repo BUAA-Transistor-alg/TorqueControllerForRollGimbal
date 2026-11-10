@@ -9,9 +9,9 @@
 #include "gimbal_dynamics/dynamics_model.hpp"
 #include "gimbal_dynamics/math_types.hpp"
 #include "gimbal_dynamics/simulation.hpp"
-#include "model_evaluation.hpp"
+#include "gimbal_dynamics/model_evaluation.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace detail {
 
 // 只保留导数路径实际读取的字段：前向阶段的解与偏置力中间量；
@@ -34,4 +34,4 @@ void evaluate_stage_data(const ScalarModelParameters<Real>& model,
                          StageData& out);
 
 }  // namespace detail
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

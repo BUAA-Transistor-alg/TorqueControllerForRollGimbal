@@ -13,10 +13,10 @@
 #include "gimbal_dynamics/dynamics_model.hpp"
 #include "gimbal_dynamics/math_types.hpp"
 #include "gimbal_dynamics/parameters.hpp"
-#include "model_evaluation.hpp"
-#include "stage_data.hpp"
+#include "gimbal_dynamics/model_evaluation.hpp"
+#include "gimbal_dynamics/stage_data.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace detail {
 
 // 单阶段的状态 Jacobian ∂f/∂y 与输入 Jacobian ∂f/∂τ，y = [q; q̇]
@@ -52,4 +52,4 @@ void apply_sensitivity(const math::Matrix8d& propagation,
                        SensitivityMatrix& next);
 
 }  // namespace detail
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics

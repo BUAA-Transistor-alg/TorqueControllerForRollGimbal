@@ -10,7 +10,7 @@
 #include "gimbal_dynamics/parameters.hpp"
 #include "gimbal_dynamics/simulation.hpp"
 
-namespace gimbal {
+namespace tcrg::gimbal_dynamics {
 namespace detail {
 class ThreadPool;
 }
@@ -50,4 +50,4 @@ Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& te
                                    detail::ThreadPool& pool);
 
 }  // namespace parameter_gradient
-}  // namespace gimbal
+}  // namespace tcrg::gimbal_dynamics
