@@ -162,14 +162,16 @@ struct ControlGradientOutputT {
 
 template <typename Real>
 struct ControlGradientBatchInputT {
-    ModelParametersT<Real> model;
-    TerrainT<Real> terrain;
-    const simulation::StateT<Real>* initial = nullptr;  // batch
-    const BaseStateT<Real>* base = nullptr;              // batch*num_steps
-    const math::Vector<Real, 4>* torque = nullptr;       // batch*num_steps
-    std::size_t num_steps = 0;
-    simulation::TrajectorySpecT<Real> spec;
-    const simulation::LossSpecT<Real>* loss = nullptr;   // batch
+    ModelParametersT<Real> model;                          // 批次内共享
+    const TerrainT<Real>* terrain = nullptr;               // batch
+    const simulation::StateT<Real>* initial = nullptr;     // batch
+    const BaseStateT<Real>* base = nullptr;                // batch*num_steps
+    const math::Vector<Real, 4>* torque = nullptr;         // batch*num_steps
+    std::size_t num_steps = 0;                             // 批次内共享
+    simulation::TrajectorySpecT<Real> spec;                // 批次内共享
+    simulation::LossWeightsT<Real> loss_weights;           // 批次内共享
+    const math::Vector<Real, 4>* target_angle = nullptr;   // batch*num_steps
+    const math::Vector<Real, 4>* target_velocity = nullptr;  // batch*num_steps
 };
 
 template <typename Real>
@@ -208,14 +210,16 @@ struct ParameterSensitivityInputT {
 
 template <typename Real>
 struct ParameterSensitivityBatchInputT {
-    ModelParametersT<Real> model;
-    TerrainT<Real> terrain;
-    const simulation::StateT<Real>* initial = nullptr;
-    const BaseStateT<Real>* base = nullptr;
-    const math::Vector<Real, 4>* torque = nullptr;
-    std::size_t num_steps = 0;
-    simulation::TrajectorySpecT<Real> spec;
-    const simulation::LossSpecT<Real>* loss = nullptr;
+    ModelParametersT<Real> model;                          // 批次内共享
+    const TerrainT<Real>* terrain = nullptr;               // batch
+    const simulation::StateT<Real>* initial = nullptr;     // batch
+    const BaseStateT<Real>* base = nullptr;                // batch*num_steps
+    const math::Vector<Real, 4>* torque = nullptr;         // batch*num_steps
+    std::size_t num_steps = 0;                             // 批次内共享
+    simulation::TrajectorySpecT<Real> spec;                // 批次内共享
+    simulation::LossWeightsT<Real> loss_weights;           // 批次内共享
+    const math::Vector<Real, 4>* target_angle = nullptr;   // batch*num_steps
+    const math::Vector<Real, 4>* target_velocity = nullptr;  // batch*num_steps
 };
 
 template <typename Real>
@@ -315,14 +319,16 @@ public:
         output.final_state.resize(batch);
         tcrg_abi::BatchGradientInput abi{};
         abi.model = &input.model;
-        abi.terrain = &input.terrain;
+        abi.terrain = input.terrain;
         abi.initial = input.initial;
         abi.base = input.base;
         abi.torque = input.torque;
         abi.num_steps = input.num_steps;
         abi.step = static_cast<double>(input.spec.step);
         abi.refinement = input.spec.refinement;
-        abi.losses = input.loss;
+        abi.loss_weights = &input.loss_weights;
+        abi.target_angle = input.target_angle;
+        abi.target_velocity = input.target_velocity;
         tcrg_abi::BatchForwardOutput result{};
         result.mean_loss = &output.mean_loss;
         result.step_end = output.step_end.data();
@@ -379,14 +385,16 @@ public:
         output.final_state.resize(batch);
         tcrg_abi::BatchGradientInput abi{};
         abi.model = &input.model;
-        abi.terrain = &input.terrain;
+        abi.terrain = input.terrain;
         abi.initial = input.initial;
         abi.base = input.base;
         abi.torque = input.torque;
         abi.num_steps = input.num_steps;
         abi.step = static_cast<double>(input.spec.step);
         abi.refinement = input.spec.refinement;
-        abi.losses = input.loss;
+        abi.loss_weights = &input.loss_weights;
+        abi.target_angle = input.target_angle;
+        abi.target_velocity = input.target_velocity;
         tcrg_abi::BatchGradientOutput result{};
         result.mean_loss = &output.mean_loss;
         result.gradient = output.gradient.data();
@@ -443,14 +451,16 @@ public:
         output.final_state.resize(batch);
         tcrg_abi::BatchGradientInput abi{};
         abi.model = &input.model;
-        abi.terrain = &input.terrain;
+        abi.terrain = input.terrain;
         abi.initial = input.initial;
         abi.base = input.base;
         abi.torque = input.torque;
         abi.num_steps = input.num_steps;
         abi.step = static_cast<double>(input.spec.step);
         abi.refinement = input.spec.refinement;
-        abi.losses = input.loss;
+        abi.loss_weights = &input.loss_weights;
+        abi.target_angle = input.target_angle;
+        abi.target_velocity = input.target_velocity;
         tcrg_abi::BatchGradientOutput result{};
         result.mean_loss = &output.mean_loss;
         result.gradient = &output.gradient;

@@ -62,15 +62,17 @@ struct GradientOutput {
 };
 
 struct BatchGradientInput {
-    const void* model = nullptr;
-    const void* terrain = nullptr;
-    const void* initial = nullptr;
-    const void* base = nullptr;
-    const void* torque = nullptr;
+    const void* model = nullptr;            // 单个模型参数
+    const void* terrain = nullptr;          // 长度 batch 的地形数组
+    const void* initial = nullptr;          // 长度 batch 的初值数组
+    const void* base = nullptr;             // 长度 batch * num_steps
+    const void* torque = nullptr;           // 长度 batch * num_steps
     std::size_t num_steps = 0;
     double step = 0.0;
     int refinement = 1;
-    const void* losses = nullptr;
+    const void* loss_weights = nullptr;     // 共享损失权重
+    const void* target_angle = nullptr;     // 长度 batch * num_steps，可为空
+    const void* target_velocity = nullptr;  // 长度 batch * num_steps，可为空
 };
 
 struct BatchGradientOutput {

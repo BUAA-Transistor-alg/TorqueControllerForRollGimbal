@@ -41,7 +41,7 @@ Real simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain
                               Gradient* gradient, simulation::State* final_state,
                               detail::ThreadPool* pool);
 
-Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& terrain,
+Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain* terrains,
                                    const simulation::State* initial, const BaseState* base,
                                    const math::Vector4d* torque, std::size_t batch,
                                    std::size_t num_steps, const simulation::TrajectorySpec& spec,

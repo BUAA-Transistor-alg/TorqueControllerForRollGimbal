@@ -54,6 +54,30 @@ tcrg::gimbal_dynamics::Terrain from_abi_terrain(const void* pointer) {
     return *static_cast<const tcrg::gimbal_dynamics::Terrain*>(pointer);
 }
 
+// 批量调用：共享权重与逐样本参考轨迹组合出每个样本的损失配置
+std::vector<tcrg::gimbal_dynamics::simulation::LossSpec> build_batch_losses(
+    const tcrg_abi::BatchGradientInput* input, std::size_t batch) {
+    const auto* weights =
+        static_cast<const tcrg::gimbal_dynamics::simulation::LossWeightsT<Real>*>(
+            input->loss_weights);
+    const auto* target_angle = static_cast<const math::Vector<Real, 4>*>(input->target_angle);
+    const auto* target_velocity =
+        static_cast<const math::Vector<Real, 4>*>(input->target_velocity);
+    std::vector<tcrg::gimbal_dynamics::simulation::LossSpec> losses(batch);
+    for (std::size_t sample = 0; sample < batch; ++sample) {
+        losses[sample].angle_weights = weights->angle_weights;
+        losses[sample].velocity_weights = weights->velocity_weights;
+        losses[sample].torque_weights = weights->torque_weights;
+        if (target_angle != nullptr) {
+            losses[sample].target_angle = target_angle + sample * input->num_steps;
+        }
+        if (target_velocity != nullptr) {
+            losses[sample].target_velocity = target_velocity + sample * input->num_steps;
+        }
+    }
+    return losses;
+}
+
 }  // namespace
 
 extern "C" {
@@ -126,14 +150,15 @@ void GIMBAL_ABI_FN(forward_batch)(GimbalAbiContext* context, std::size_t batch,
                                   const tcrg_abi::BatchGradientInput* input,
                                   tcrg_abi::BatchForwardOutput* output) {
     tcrg::gimbal_dynamics::ModelParameters model = from_abi_model(input->model);
-    tcrg::gimbal_dynamics::Terrain terrain = from_abi_terrain(input->terrain);
+    const tcrg::gimbal_dynamics::Terrain* terrains =
+        static_cast<const tcrg::gimbal_dynamics::Terrain*>(input->terrain);
     const tcrg::gimbal_dynamics::simulation::State* initial =
         static_cast<const tcrg::gimbal_dynamics::simulation::State*>(input->initial);
     const tcrg::gimbal_dynamics::BaseState* base = static_cast<const tcrg::gimbal_dynamics::BaseState*>(input->base);
     const math::Vector<Real, 4>* torque =
         static_cast<const math::Vector<Real, 4>*>(input->torque);
-    const tcrg::gimbal_dynamics::simulation::LossSpec* losses =
-        static_cast<const tcrg::gimbal_dynamics::simulation::LossSpec*>(input->losses);
+    const std::vector<tcrg::gimbal_dynamics::simulation::LossSpec> losses =
+        build_batch_losses(input, batch);
     tcrg::gimbal_dynamics::simulation::TrajectorySpec spec{Real(input->step), input->refinement};
     tcrg::gimbal_dynamics::simulation::State* step_end = static_cast<tcrg::gimbal_dynamics::simulation::State*>(output->step_end);
     tcrg::gimbal_dynamics::simulation::State* final_state =
@@ -149,7 +174,7 @@ void GIMBAL_ABI_FN(forward_batch)(GimbalAbiContext* context, std::size_t batch,
             const std::size_t offset = sample * input->num_steps;
             tcrg::gimbal_dynamics::simulation::Trace trace;
             loss_values[sample] = tcrg::gimbal_dynamics::simulation::simulate(
-                model, terrain, initial[sample], base + offset, torque + offset,
+                model, terrains[sample], initial[sample], base + offset, torque + offset,
                 input->num_steps, spec, losses[sample], trace);
             for (std::size_t k = 0; k < input->num_steps; ++k) {
                 step_end[offset + k] = trace.step_end[k];
@@ -190,18 +215,19 @@ void GIMBAL_ABI_FN(control_gradient_batch)(GimbalAbiContext* context, std::size_
                                            const tcrg_abi::BatchGradientInput* input,
                                            tcrg_abi::BatchGradientOutput* output) {
     tcrg::gimbal_dynamics::ModelParameters model = from_abi_model(input->model);
-    tcrg::gimbal_dynamics::Terrain terrain = from_abi_terrain(input->terrain);
+    const tcrg::gimbal_dynamics::Terrain* terrains =
+        static_cast<const tcrg::gimbal_dynamics::Terrain*>(input->terrain);
     const tcrg::gimbal_dynamics::simulation::State* initial =
         static_cast<const tcrg::gimbal_dynamics::simulation::State*>(input->initial);
     const tcrg::gimbal_dynamics::BaseState* base = static_cast<const tcrg::gimbal_dynamics::BaseState*>(input->base);
     const math::Vector<Real, 4>* torque =
         static_cast<const math::Vector<Real, 4>*>(input->torque);
-    const tcrg::gimbal_dynamics::simulation::LossSpec* losses =
-        static_cast<const tcrg::gimbal_dynamics::simulation::LossSpec*>(input->losses);
+    const std::vector<tcrg::gimbal_dynamics::simulation::LossSpec> losses =
+        build_batch_losses(input, batch);
     tcrg::gimbal_dynamics::simulation::TrajectorySpec spec{Real(input->step), input->refinement};
     BackendContext* const ctx = as_context(context);
     *static_cast<Real*>(output->mean_loss) = tcrg::gimbal_dynamics::control_gradient::simulateAndGradientBatch(
-        model, terrain, initial, base, torque, batch, input->num_steps, spec, losses,
+        model, terrains, initial, base, torque, batch, input->num_steps, spec, losses.data(),
         ctx->control_batch, static_cast<math::Vector<Real, 4>*>(output->gradient),
         static_cast<tcrg::gimbal_dynamics::simulation::State*>(output->final_state), ctx->pool);
 }
@@ -233,19 +259,20 @@ void GIMBAL_ABI_FN(parameter_sensitivity_batch)(GimbalAbiContext* context, std::
                                                 const tcrg_abi::BatchGradientInput* input,
                                                 tcrg_abi::BatchGradientOutput* output) {
     tcrg::gimbal_dynamics::ModelParameters model = from_abi_model(input->model);
-    tcrg::gimbal_dynamics::Terrain terrain = from_abi_terrain(input->terrain);
+    const tcrg::gimbal_dynamics::Terrain* terrains =
+        static_cast<const tcrg::gimbal_dynamics::Terrain*>(input->terrain);
     const tcrg::gimbal_dynamics::simulation::State* initial =
         static_cast<const tcrg::gimbal_dynamics::simulation::State*>(input->initial);
     const tcrg::gimbal_dynamics::BaseState* base = static_cast<const tcrg::gimbal_dynamics::BaseState*>(input->base);
     const math::Vector<Real, 4>* torque =
         static_cast<const math::Vector<Real, 4>*>(input->torque);
-    const tcrg::gimbal_dynamics::simulation::LossSpec* losses =
-        static_cast<const tcrg::gimbal_dynamics::simulation::LossSpec*>(input->losses);
+    const std::vector<tcrg::gimbal_dynamics::simulation::LossSpec> losses =
+        build_batch_losses(input, batch);
     tcrg::gimbal_dynamics::simulation::TrajectorySpec spec{Real(input->step), input->refinement};
     BackendContext* const ctx = as_context(context);
     *static_cast<Real*>(output->mean_loss) =
         tcrg::gimbal_dynamics::parameter_gradient::simulateAndSensitivityBatch(
-            model, terrain, initial, base, torque, batch, input->num_steps, spec, losses,
+            model, terrains, initial, base, torque, batch, input->num_steps, spec, losses.data(),
             ctx->parameter_batch,
             static_cast<tcrg::gimbal_dynamics::parameter_gradient::Gradient*>(output->gradient),
             static_cast<tcrg::gimbal_dynamics::simulation::State*>(output->final_state), ctx->pool);

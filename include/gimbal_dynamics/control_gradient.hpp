@@ -42,7 +42,7 @@ Real simulateAndGradient(const ModelParameters& model, const Terrain& terrain,
                            math::Vector4d* gradient, simulation::State* final_state,
                            detail::ThreadPool* pool);
 
-Real simulateAndGradientBatch(const ModelParameters& model, const Terrain& terrain,
+Real simulateAndGradientBatch(const ModelParameters& model, const Terrain* terrains,
                                 const simulation::State* initial, const BaseState* base,
                                 const math::Vector4d* torque, std::size_t batch,
                                 std::size_t num_steps, const simulation::TrajectorySpec& spec,

@@ -213,7 +213,7 @@ Real simulateAndSensitivity(const ModelParameters& model, const Terrain& terrain
                                         loss, workspace, gradient, final_state);
 }
 
-Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& terrain,
+Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain* terrains,
                                  const simulation::State* initial, const BaseState* base,
                                  const math::Vector4d* torque, std::size_t batch,
                                  std::size_t num_steps, const simulation::TrajectorySpec& spec,
@@ -237,7 +237,8 @@ Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& te
             Workspace& work = workspace.workspaces[static_cast<std::size_t>(participant)];
             const std::size_t offset = sample * num_steps;
             loss_values[sample] = simulateAndSensitivitySerial(
-                model, terrain, initial[sample], base + offset, torque + offset, num_steps, spec,
+                model, terrains[sample], initial[sample], base + offset, torque + offset, num_steps,
+                spec,
                 loss[sample], work, (gradient != nullptr) ? &sample_gradients[sample] : nullptr,
                 (final_state != nullptr) ? final_state + sample : nullptr);
         },

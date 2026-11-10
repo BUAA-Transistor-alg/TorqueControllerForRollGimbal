@@ -161,7 +161,8 @@ struct BatchState {
     std::vector<simulation::StateT<double>> initial;
     std::vector<BaseStateT<double>> base;
     std::vector<math::Vector<double, 4>> torque;
-    std::vector<simulation::LossSpecT<double>> losses;
+    std::vector<TerrainT<double>> terrain;
+    simulation::LossWeightsT<double> loss_weights;
     std::vector<math::Vector<double, 4>> target_angle;
     std::vector<math::Vector<double, 4>> target_velocity;
 };
@@ -172,9 +173,12 @@ BatchState build_batch(std::size_t batch) {
     state.initial.resize(batch, single.initial);
     state.base.resize(batch * kNumSteps);
     state.torque.resize(batch * kNumSteps);
-    state.target_angle = single.target_angle;
-    state.target_velocity = single.target_velocity;
-    state.losses.resize(batch, single.loss);
+    state.terrain.resize(batch, single.terrain);
+    state.target_angle.resize(batch * kNumSteps);
+    state.target_velocity.resize(batch * kNumSteps);
+    state.loss_weights.angle_weights = single.loss.angle_weights;
+    state.loss_weights.velocity_weights = single.loss.velocity_weights;
+    state.loss_weights.torque_weights = single.loss.torque_weights;
     for (std::size_t s = 0; s < batch; ++s) {
         for (std::size_t k = 0; k < kNumSteps; ++k) {
             const double t = static_cast<double>(k) * 0.01;
@@ -187,6 +191,8 @@ BatchState build_batch(std::size_t batch) {
             base.acceleration[2] = 0.05;
             state.torque[s * kNumSteps + k] =
                 math::Vector<double, 4>::from(0.20, -0.12, 0.06, -0.04);
+            state.target_angle[s * kNumSteps + k] = single.target_angle[k];
+            state.target_velocity[s * kNumSteps + k] = single.target_velocity[k];
         }
     }
     return state;
@@ -199,15 +205,16 @@ void benchmark_batch(std::size_t batch) {
 
     ControlGradientBatchInputT<double> gradient_input;
     gradient_input.model = ModelParametersT<double>::demo();
-    gradient_input.terrain.slope_angle = 0.05;
-    gradient_input.terrain.slope_direction = 0.7;
+    gradient_input.terrain = state.terrain.data();
     gradient_input.initial = state.initial.data();
     gradient_input.base = state.base.data();
     gradient_input.torque = state.torque.data();
     gradient_input.num_steps = kNumSteps;
     gradient_input.spec.step = 0.01;
     gradient_input.spec.refinement = 2;
-    gradient_input.loss = state.losses.data();
+    gradient_input.loss_weights = state.loss_weights;
+    gradient_input.target_angle = state.target_angle.data();
+    gradient_input.target_velocity = state.target_velocity.data();
     ControlGradientBatchOutputT<double> gradient_output;
     auto run_gradient = [&] {
         gradient_handler.runBatch(batch, gradient_input, gradient_output);
@@ -227,15 +234,16 @@ void benchmark_batch(std::size_t batch) {
 
     ParameterSensitivityBatchInputT<double> sensitivity_input;
     sensitivity_input.model = ModelParametersT<double>::demo();
-    sensitivity_input.terrain.slope_angle = 0.05;
-    sensitivity_input.terrain.slope_direction = 0.7;
+    sensitivity_input.terrain = state.terrain.data();
     sensitivity_input.initial = state.initial.data();
     sensitivity_input.base = state.base.data();
     sensitivity_input.torque = state.torque.data();
     sensitivity_input.num_steps = kNumSteps;
     sensitivity_input.spec.step = 0.01;
     sensitivity_input.spec.refinement = 2;
-    sensitivity_input.loss = state.losses.data();
+    sensitivity_input.loss_weights = state.loss_weights;
+    sensitivity_input.target_angle = state.target_angle.data();
+    sensitivity_input.target_velocity = state.target_velocity.data();
     ParameterSensitivityBatchOutputT<double> sensitivity_output;
     auto run_sensitivity = [&] {
         sensitivity_handler.runBatch(batch, sensitivity_input, sensitivity_output);

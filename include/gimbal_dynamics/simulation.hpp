@@ -31,6 +31,14 @@ struct LossSpecT {
     const math::Vector<Real, 4>* target_velocity = nullptr;
 };
 
+// 批量调用共享的损失权重：批次内所有样本使用同一组权重
+template <typename Real>
+struct LossWeightsT {
+    math::Vector<Real, 4> angle_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> velocity_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> torque_weights = math::Vector<Real, 4>::zero();
+};
+
 // 定步长设置：每个主步内做 refinement 次经典 RK4
 template <typename Real>
 struct TrajectorySpecT {

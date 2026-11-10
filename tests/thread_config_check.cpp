@@ -67,15 +67,18 @@ int main() {
     const std::size_t batch = 3;
     ControlGradientBatchInputT<double> batch_input;
     batch_input.model = problem.model;
-    batch_input.terrain = problem.terrain;
     std::vector<simulation::StateT<double>> initial(batch, problem.initial);
     std::vector<BaseStateT<double>> base(batch * problem.num_steps);
     std::vector<math::Vector<double, 4>> torque(batch * problem.num_steps);
-    std::vector<simulation::LossSpecT<double>> losses(batch, problem.loss);
+    std::vector<TerrainT<double>> terrain_batch(batch, problem.terrain);
+    std::vector<math::Vector<double, 4>> target_angle(batch * problem.num_steps);
+    std::vector<math::Vector<double, 4>> target_velocity(batch * problem.num_steps);
     for (std::size_t s = 0; s < batch; ++s) {
         for (std::size_t k = 0; k < problem.num_steps; ++k) {
             base[s * problem.num_steps + k] = problem.base[k];
             torque[s * problem.num_steps + k] = problem.torque[k];
+            target_angle[s * problem.num_steps + k] = problem.target_angle[k];
+            target_velocity[s * problem.num_steps + k] = problem.target_velocity[k];
         }
     }
     batch_input.initial = initial.data();
@@ -83,7 +86,12 @@ int main() {
     batch_input.torque = torque.data();
     batch_input.num_steps = problem.num_steps;
     batch_input.spec = problem.spec;
-    batch_input.loss = losses.data();
+    batch_input.terrain = terrain_batch.data();
+    batch_input.loss_weights.angle_weights = problem.loss.angle_weights;
+    batch_input.loss_weights.velocity_weights = problem.loss.velocity_weights;
+    batch_input.loss_weights.torque_weights = problem.loss.torque_weights;
+    batch_input.target_angle = target_angle.data();
+    batch_input.target_velocity = target_velocity.data();
     ControlGradient<double> batch_handler(8);
     ControlGradientBatchOutputT<double> batch_output;
     batch_handler.runBatch(batch, batch_input, batch_output);
@@ -104,13 +112,17 @@ int main() {
     sensitivity_handler.run(support::parameter_input(problem), single_sensitivity);
     ParameterSensitivityBatchInputT<double> parameter_batch_input;
     parameter_batch_input.model = problem.model;
-    parameter_batch_input.terrain = problem.terrain;
     parameter_batch_input.initial = initial.data();
     parameter_batch_input.base = base.data();
     parameter_batch_input.torque = torque.data();
     parameter_batch_input.num_steps = problem.num_steps;
     parameter_batch_input.spec = problem.spec;
-    parameter_batch_input.loss = losses.data();
+    parameter_batch_input.terrain = terrain_batch.data();
+    parameter_batch_input.loss_weights.angle_weights = problem.loss.angle_weights;
+    parameter_batch_input.loss_weights.velocity_weights = problem.loss.velocity_weights;
+    parameter_batch_input.loss_weights.torque_weights = problem.loss.torque_weights;
+    parameter_batch_input.target_angle = target_angle.data();
+    parameter_batch_input.target_velocity = target_velocity.data();
     ParameterSensitivityBatchOutputT<double> batch_sensitivity;
     sensitivity_handler.runBatch(batch, parameter_batch_input, batch_sensitivity);
     bool parameter_batch_ok = std::fabs(batch_sensitivity.mean_loss - single_sensitivity.loss) <
