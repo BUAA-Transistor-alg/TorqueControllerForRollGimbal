@@ -229,6 +229,7 @@ Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& te
     simulation::validate(spec, num_steps);
     workspace.resize(batch, pool);
     std::vector<Real> loss_values(batch);
+    std::vector<Gradient> sample_gradients(batch);
     const std::size_t participants = static_cast<std::size_t>(pool.participant_count());
     const std::size_t chunk = std::max<std::size_t>(1, batch / participants);
     pool.parallel_dynamic(
@@ -237,13 +238,18 @@ Real simulateAndSensitivityBatch(const ModelParameters& model, const Terrain& te
             const std::size_t offset = sample * num_steps;
             loss_values[sample] = simulateAndSensitivitySerial(
                 model, terrain, initial[sample], base + offset, torque + offset, num_steps, spec,
-                loss[sample], work, (gradient != nullptr) ? gradient + sample : nullptr,
+                loss[sample], work, (gradient != nullptr) ? &sample_gradients[sample] : nullptr,
                 (final_state != nullptr) ? final_state + sample : nullptr);
         },
         chunk);
     Real total = Real(0);
+    Gradient accumulated = Gradient::zero();
     for (std::size_t sample = 0; sample < batch; ++sample) {
         total += loss_values[sample];
+        accumulated += sample_gradients[sample];
+    }
+    if (gradient != nullptr) {
+        *gradient = accumulated / static_cast<Real>(batch);
     }
     return total / static_cast<Real>(batch);
 }

@@ -20,8 +20,8 @@ struct StateT {
 };
 
 // 标量轨迹损失（时间均值形式）：
-//   L = 1/(2K) Σ_k [ Σ_i wa_i (q_i - q*_i)^2 + Σ_i wv_i (v_i - v*_i)^2
-//                    + Σ_i wt_i τ_{k,i}^2 ]
+//   L = 1/K Σ_k [ Σ_i wa_i (q_i - q*_i)^2 + Σ_i wv_i (v_i - v*_i)^2
+//                  + Σ_i wt_i τ_{k,i}^2 ]
 template <typename Real>
 struct LossSpecT {
     math::Vector<Real, 4> angle_weights = math::Vector<Real, 4>::zero();

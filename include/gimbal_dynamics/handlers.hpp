@@ -221,7 +221,8 @@ struct ParameterSensitivityBatchInputT {
 template <typename Real>
 struct ParameterSensitivityBatchOutputT {
     Real mean_loss = Real(0);
-    std::vector<math::Vector<Real, parameters::kParameterCount>> gradient;  // batch
+    math::Vector<Real, parameters::kParameterCount> gradient =
+        math::Vector<Real, parameters::kParameterCount>::zero();  // 批次内平均
     std::vector<simulation::StateT<Real>> final_state;  // batch
 };
 
@@ -438,7 +439,7 @@ public:
 
     void runBatch(std::size_t batch, const ParameterSensitivityBatchInputT<Real>& input,
                   ParameterSensitivityBatchOutputT<Real>& output) const {
-        output.gradient.resize(batch);
+        output.gradient = math::Vector<Real, parameters::kParameterCount>::zero();
         output.final_state.resize(batch);
         tcrg_abi::BatchGradientInput abi{};
         abi.model = &input.model;
@@ -452,7 +453,7 @@ public:
         abi.losses = input.loss;
         tcrg_abi::BatchGradientOutput result{};
         result.mean_loss = &output.mean_loss;
-        result.gradient = output.gradient.data();
+        result.gradient = &output.gradient;
         result.final_state = output.final_state.data();
         detail::BackendTraits<Real>::parameter_sensitivity_batch(context_, batch, &abi, &result);
     }

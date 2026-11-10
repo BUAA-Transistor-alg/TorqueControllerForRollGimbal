@@ -99,6 +99,33 @@ int main() {
         }
     }
 
+    ParameterSensitivity<double> sensitivity_handler(8);
+    ParameterSensitivityOutputT<double> single_sensitivity;
+    sensitivity_handler.run(support::parameter_input(problem), single_sensitivity);
+    ParameterSensitivityBatchInputT<double> parameter_batch_input;
+    parameter_batch_input.model = problem.model;
+    parameter_batch_input.terrain = problem.terrain;
+    parameter_batch_input.initial = initial.data();
+    parameter_batch_input.base = base.data();
+    parameter_batch_input.torque = torque.data();
+    parameter_batch_input.num_steps = problem.num_steps;
+    parameter_batch_input.spec = problem.spec;
+    parameter_batch_input.loss = losses.data();
+    ParameterSensitivityBatchOutputT<double> batch_sensitivity;
+    sensitivity_handler.runBatch(batch, parameter_batch_input, batch_sensitivity);
+    bool parameter_batch_ok = std::fabs(batch_sensitivity.mean_loss - single_sensitivity.loss) <
+                              1e-12 * std::max(1.0, std::fabs(single_sensitivity.loss));
+    for (int i = 0; i < parameters::kParameterCount; ++i) {
+        parameter_batch_ok =
+            parameter_batch_ok &&
+            std::fabs(batch_sensitivity.gradient[i] - single_sensitivity.gradient[i]) <
+                1e-12 * std::max(1.0, std::fabs(single_sensitivity.gradient[i]));
+    }
+    if (!parameter_batch_ok) {
+        printf("参数灵敏度批量平均值与单样本不一致\n");
+        return 1;
+    }
+
     auto problem_float = support::make_problem<float>(20);
     ControlGradient<float> float_handler(8);
     ControlGradientOutputT<float> float_output;

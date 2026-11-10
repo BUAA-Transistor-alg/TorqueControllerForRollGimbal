@@ -39,7 +39,7 @@ math::Vector8d state_derivative(const ModelParameters& model, const Terrain& ter
 
 Real step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
                  const State& state, const math::Vector4d& torque) {
-    const Real scale = 1.0 / (2.0 * static_cast<Real>(num_steps));
+    const Real scale = 1.0 / static_cast<Real>(num_steps);
     Real total = 0.0;
     for (int i = 0; i < 4; ++i) {
         const Real angle_target =
@@ -57,7 +57,7 @@ Real step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
 
 math::Vector8d step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
                                   std::size_t step, const State& state) {
-    const Real scale = 1.0 / static_cast<Real>(num_steps);
+    const Real scale = 2.0 / static_cast<Real>(num_steps);
     math::Vector8d gradient;
     for (int i = 0; i < 4; ++i) {
         const Real angle_target =

@@ -24,7 +24,7 @@ void reversePass(const simulation::LossSpec& loss, const math::Vector4d* torque,
                  std::size_t num_steps, std::size_t refinement, Workspace& workspace,
                  math::Vector4d* gradient) {
     math::Vector8d adjoint = math::Vector8d::zero();
-    const Real torque_scale = Real(1) / static_cast<Real>(num_steps);
+    const Real torque_scale = Real(2) / static_cast<Real>(num_steps);
     for (std::size_t k = num_steps; k-- > 0;) {
         adjoint += simulation::step_loss_gradient(loss, num_steps, k, workspace.trace.step_end[k]);
         math::Vector4d accumulated = math::Vector4d::zero();
