@@ -29,7 +29,7 @@ if(GIMBAL_VECTORIZE AND GIMBAL_HAS_AVX2)
     list(APPEND GIMBAL_HOT_FLAGS "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-mavx2;-ffp-contract=off>")
 endif()
 
-# 每个精度后端独立编译一份：双精度在 tcrg::gimbal_dynamics，单精度在 tcrg_f::gimbal_dynamics
+# 每个精度后端独立编译一份：双精度在 tcrg::gimbal_dynamics，单精度后缀为 tcrg::gimbal_dynamics_f
 function(gimbal_add_backend target prefix)
     add_library(${target} STATIC ${GIMBAL_BACKEND_SOURCES})
     target_include_directories(${target} PUBLIC include)
@@ -40,7 +40,7 @@ endfunction()
 
 gimbal_add_backend(gimbal_backend_double tcrg_backend_double_)
 gimbal_add_backend(gimbal_backend_float tcrg_backend_float_)
-target_compile_definitions(gimbal_backend_float PRIVATE tcrg=tcrg_f GIMBAL_REAL_FLOAT)
+target_compile_definitions(gimbal_backend_float PRIVATE gimbal_dynamics=gimbal_dynamics_f GIMBAL_REAL_FLOAT)
 
 add_library(gimbal_dynamics INTERFACE)
 target_include_directories(gimbal_dynamics INTERFACE include)
