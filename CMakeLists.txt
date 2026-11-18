@@ -1,12 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(RollGimbalDynamics LANGUAGES CXX)
+project(RollGimbalDynamics LANGUAGES C CXX)
 
 find_package(Threads REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(GIMBAL_BACKEND_SOURCES
     src/gimbal_dynamics/dynamics_model.cpp
@@ -45,6 +46,13 @@ target_compile_definitions(gimbal_backend_float PRIVATE gimbal_dynamics=gimbal_d
 add_library(gimbal_dynamics INTERFACE)
 target_include_directories(gimbal_dynamics INTERFACE include)
 target_link_libraries(gimbal_dynamics INTERFACE gimbal_backend_double gimbal_backend_float)
+
+# C 接口共享库，供 Python ctypes 或其他语言调用；内部使用双精度后端
+add_library(gimbal_dynamics_c SHARED src/gimbal_dynamics/c_api.cpp)
+target_include_directories(gimbal_dynamics_c PUBLIC include)
+target_link_libraries(gimbal_dynamics_c PRIVATE gimbal_backend_double Threads::Threads)
+target_compile_options(gimbal_dynamics_c PRIVATE -Wall -Wextra)
+set_target_properties(gimbal_dynamics_c PROPERTIES OUTPUT_NAME gimbal_dynamics)
 
 option(GIMBAL_DYNAMICS_BUILD_BENCHMARKS "构建基准程序" ON)
 if(GIMBAL_DYNAMICS_BUILD_BENCHMARKS)
@@ -85,4 +93,10 @@ if(GIMBAL_DYNAMICS_BUILD_TESTS)
     target_compile_options(thread_config_check PRIVATE -Wall -Wextra)
     add_test(NAME thread_config_check COMMAND thread_config_check)
     set_tests_properties(thread_config_check PROPERTIES TIMEOUT 120)
+
+    add_executable(c_api_check tests/c_api_check.c)
+    target_link_libraries(c_api_check PRIVATE gimbal_dynamics_c)
+    target_compile_options(c_api_check PRIVATE -Wall -Wextra)
+    add_test(NAME c_api_check COMMAND c_api_check)
+    set_tests_properties(c_api_check PROPERTIES TIMEOUT 120)
 endif()
