@@ -96,6 +96,31 @@ def quaternion_from_matrix(matrix: np.ndarray) -> list[float]:
     return [x, y, z, w]
 
 
+class PidController:
+    def __init__(self) -> None:
+        self.integral = [0.0, 0.0, 0.0, 0.0]
+
+    def reset(self) -> None:
+        self.integral = [0.0, 0.0, 0.0, 0.0]
+
+    def torque(self, angles: list[float], velocities: list[float],
+               target: list[float], dt: float) -> list[float]:
+        command = [0.0, 0.0, 0.0, 0.0]
+        for i in range(4):
+            error = target[i] - angles[i]
+            self.integral[i] = max(
+                -params.PID_INTEGRAL_LIMIT,
+                min(params.PID_INTEGRAL_LIMIT, self.integral[i] + error * dt),
+            )
+            value = (
+                params.PID_KP[i] * error
+                + params.PID_KI[i] * self.integral[i]
+                - params.PID_KD[i] * velocities[i]
+            )
+            command[i] = max(-params.PID_TORQUE_LIMIT, min(params.PID_TORQUE_LIMIT, value))
+        return command
+
+
 def link_poses(angles: list[float]):
     q1, q2, q3, q4 = angles
     r1 = rot_z(q1)
@@ -128,7 +153,8 @@ def create_visual_body(shape_id: int, position, color, mass: float = 0.0) -> int
 
 
 class Viewer:
-    def __init__(self, direct: bool = False):
+    def __init__(self, direct: bool = False, mode: str = "torque",
+                 target_rate: float | None = None):
         self.direct = direct
         if direct:
             self.client = p.connect(p.DIRECT)
@@ -166,13 +192,18 @@ class Viewer:
         self.state = gd.make_state()
         self.context = gd.Context(1)
         self.pressed: set[int] = set()
-        self.last_state = self.state
+        self.mode = mode
+        self.target_rate = params.PID_TARGET_RATE if target_rate is None else target_rate
+        self.target = [0.0, 0.0, 0.0, 0.0]
+        self.pid = PidController()
+        self.mode_text_id = -1
         self.reset()
 
     def reset(self) -> None:
         self.state = gd.make_state()
-        self.last_state = self.state
         self.pressed.clear()
+        self.target = [0.0, 0.0, 0.0, 0.0]
+        self.pid.reset()
         self.update_visuals()
 
     def torque_command(self) -> list[float]:
@@ -189,6 +220,13 @@ class Viewer:
             if key == ord("r") and (event & p.KEY_WAS_TRIGGERED):
                 self.reset()
                 continue
+            if key == ord("m") and (event & p.KEY_WAS_TRIGGERED):
+                self.pressed.clear()
+                self.mode = "pid" if self.mode == "torque" else "torque"
+                if self.mode == "pid":
+                    self.target = [self.state.angle[i] for i in range(4)]
+                    self.pid.reset()
+                continue
             if key in KEY_TORQUE:
                 if event & p.KEY_WAS_RELEASED:
                     self.pressed.discard(key)
@@ -196,18 +234,53 @@ class Viewer:
                     self.pressed.add(key)
         return True
 
-    def advance(self) -> None:
-        torque = self.torque_command()
-        torques = [torque for _ in range(STEPS_PER_FRAME)]
-        self.state = self.context.forward_simulate(
-            self.model,
-            self.terrain,
-            self.base,
-            self.state,
-            torques,
-            step=STEP,
-            refinement=REFINEMENT,
+    def update_targets(self, dt: float) -> None:
+        for key in self.pressed:
+            joint, sign = KEY_TORQUE[key]
+            value = self.target[joint] + sign * self.target_rate * dt
+            self.target[joint] = max(
+                -params.PID_TARGET_LIMIT,
+                min(params.PID_TARGET_LIMIT, value),
+            )
+
+    def pid_torque(self, dt: float) -> list[float]:
+        angles = [self.state.angle[i] for i in range(4)]
+        velocities = [self.state.velocity[i] for i in range(4)]
+        feedback = self.pid.torque(angles, velocities, self.target, dt)
+        gravity = self.context.bias_torque(
+            self.model, self.terrain, self.base, self.state
         )
+        return [
+            max(-params.PID_TORQUE_LIMIT, min(params.PID_TORQUE_LIMIT, feedback[i] + gravity[i]))
+            for i in range(4)
+        ]
+
+    def advance(self) -> None:
+        if self.mode == "torque":
+            torque = self.torque_command()
+            torques = [torque for _ in range(STEPS_PER_FRAME)]
+            self.state = self.context.forward_simulate(
+                self.model,
+                self.terrain,
+                self.base,
+                self.state,
+                torques,
+                step=STEP,
+                refinement=REFINEMENT,
+            )
+        else:
+            for _ in range(STEPS_PER_FRAME):
+                self.update_targets(STEP)
+                torque = self.pid_torque(STEP)
+                self.state = self.context.forward_step(
+                    self.model,
+                    self.terrain,
+                    self.base,
+                    self.state,
+                    torque,
+                    step=STEP,
+                    refinement=REFINEMENT,
+                )
         self.update_visuals()
 
     def update_visuals(self) -> None:
@@ -236,6 +309,20 @@ class Viewer:
                 lineWidth=2.0,
                 replaceItemUniqueId=self.axis_ids[joint],
             )
+        if self.mode == "pid":
+            text = "mode: PID target"
+            for i in range(4):
+                text += f"  T{i + 1}={self.target[i]:+.2f}"
+                text += f" Q{i + 1}={angles[i]:+.2f}"
+        else:
+            text = "mode: direct torque"
+        self.mode_text_id = p.addUserDebugText(
+            text,
+            [0.0, 0.0, 0.62],
+            textColorRGB=[0.95, 0.95, 0.95],
+            textSize=1.0,
+            replaceItemUniqueId=self.mode_text_id,
+        )
 
     def step(self) -> None:
         if not self.direct:
@@ -255,10 +342,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="四自由度串链动力学 PyBullet 可视化")
     parser.add_argument("--direct", action="store_true", help="无界面模式，用于自检")
     parser.add_argument("--steps", type=int, default=0, help="无界面模式下推进的帧数")
-    parser.add_argument("--torque", type=float, default=0.0, help="无界面模式下四个关节的恒定力矩")
+    parser.add_argument("--torque", type=float, default=0.0,
+                        help="无界面模式下恒定的力矩（力矩模式）或目标移动方向（PID 模式）")
+    parser.add_argument("--mode", choices=("torque", "pid"), default="torque",
+                        help="初始模式：直接力矩或 PID 目标位置")
+    parser.add_argument("--target-rate", type=float, default=None,
+                        help="PID 模式下按住按键时目标位置速度，rad/s")
     arguments = parser.parse_args()
 
-    viewer = Viewer(direct=arguments.direct)
+    viewer = Viewer(direct=arguments.direct, mode=arguments.mode,
+                    target_rate=arguments.target_rate)
     try:
         if arguments.direct:
             steps = arguments.steps if arguments.steps > 0 else 60
@@ -267,10 +360,13 @@ def main() -> int:
             for _ in range(steps):
                 viewer.step()
             angles, velocities = gd.state_to_lists(viewer.state)
+            print("mode:", viewer.mode)
             print("angles:", [round(value, 6) for value in angles])
             print("velocities:", [round(value, 6) for value in velocities])
+            print("targets:", [round(value, 6) for value in viewer.target])
             return 0
-        print("键盘：1/2 关节1 ±1 N·m，3/4 关节2，5/6 关节3，7/8 关节4；r 复位；q/ESC 退出")
+        print("键盘：1/2 关节1，3/4 关节2，5/6 关节3，7/8 关节4；"
+              "力矩模式输出 ±1 N·m，PID 模式移动目标位置；m 切换模式；r 复位；q/ESC 退出")
         next_frame = time.perf_counter()
         while True:
             viewer.step()

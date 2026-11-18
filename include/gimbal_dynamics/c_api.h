@@ -57,6 +57,12 @@ int tcrg_forward_simulate(const TcrgContext* context, const TcrgModel* model,
                           size_t num_steps, double step, int refinement,
                           TcrgState* final_state);
 
+// 计算当前位形下使关节加速度为零所需的偏置力矩（含重力与底盘运动项，qdot 取零）。
+// 用于 PID 模式的重力前馈；输出长度 4。
+int tcrg_bias_torque(const TcrgContext* context, const TcrgModel* model,
+                     const TcrgTerrain* terrain, const TcrgBaseState* base,
+                     const TcrgState* state, double bias[4]);
+
 // 最近一次失败的说明；没有失败时为空字符串。
 const char* tcrg_last_error(void);
 

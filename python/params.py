@@ -38,6 +38,15 @@ DAMPING = [0.1, 0.1, 0.1, 0.1]
 
 GRAVITY = 9.81
 
+# PID 目标模式参数：四个关节的位置目标由按键以恒定速度移动，PID 计算力矩
+PID_TARGET_RATE = 0.5          # 按下按键时目标位置的速度，rad/s
+PID_TARGET_LIMIT = 3.14159265  # 目标位置限幅，rad
+PID_KP = [8.0, 2.0, 2.0, 2.0]
+PID_KI = [0.2, 0.2, 0.2, 0.2]
+PID_KD = [0.5, 0.2, 0.15, 0.1]
+PID_TORQUE_LIMIT = 10.0        # PID 输出力矩限幅，N·m
+PID_INTEGRAL_LIMIT = 2.0
+
 # 供 UI 使用的关节轴方向（父坐标系）
 JOINT_AXES = [
     [0.0, 0.0, 1.0],

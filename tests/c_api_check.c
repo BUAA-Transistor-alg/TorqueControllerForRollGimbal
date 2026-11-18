@@ -90,6 +90,20 @@ int main(void) {
         tcrg_context_destroy(context);
         return 1;
     }
+    memset(&state, 0, sizeof(state));
+    double bias[4] = {0.0, 0.0, 0.0, 0.0};
+    if (tcrg_bias_torque(context, &model, &terrain, &base, &state, bias) != 0) {
+        printf("偏置力矩失败: %s\n", tcrg_last_error());
+        tcrg_context_destroy(context);
+        return 1;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (!isfinite(bias[i])) {
+            printf("偏置力矩不是有限值\n");
+            tcrg_context_destroy(context);
+            return 1;
+        }
+    }
     tcrg_context_destroy(context);
     printf("C 接口校验通过\n");
     return 0;

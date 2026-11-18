@@ -100,6 +100,15 @@ _lib.tcrg_forward_simulate.argtypes = [
     ctypes.POINTER(TcrgState),
 ]
 _lib.tcrg_forward_simulate.restype = ctypes.c_int
+_lib.tcrg_bias_torque.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(TcrgModel),
+    ctypes.POINTER(TcrgTerrain),
+    ctypes.POINTER(TcrgBaseState),
+    ctypes.POINTER(TcrgState),
+    ctypes.POINTER(ctypes.c_double),
+]
+_lib.tcrg_bias_torque.restype = ctypes.c_int
 _lib.tcrg_last_error.argtypes = []
 _lib.tcrg_last_error.restype = ctypes.c_char_p
 
@@ -217,6 +226,21 @@ class Context:
         if result != 0:
             raise _error()
         return next_state
+
+    def bias_torque(self, model: TcrgModel, terrain: TcrgTerrain,
+                    base: TcrgBaseState, state: TcrgState) -> List[float]:
+        values = (ctypes.c_double * 4)()
+        result = _lib.tcrg_bias_torque(
+            self._context,
+            ctypes.byref(model),
+            ctypes.byref(terrain),
+            ctypes.byref(base),
+            ctypes.byref(state),
+            values,
+        )
+        if result != 0:
+            raise _error()
+        return [values[i] for i in range(4)]
 
     def forward_simulate(
         self,

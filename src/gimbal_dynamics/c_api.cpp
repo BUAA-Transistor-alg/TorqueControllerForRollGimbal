@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "gimbal_dynamics/handlers.hpp"
+#include "gimbal_dynamics/model_evaluation.hpp"
 
 namespace {
 
@@ -168,6 +169,44 @@ int tcrg_forward_simulate(const TcrgContext* context, const TcrgModel* model,
         tcrg::gimbal_dynamics::ForwardOutputT<double> output;
         context->handler.run(input, output);
         store_state(output.step_end.back(), final_state);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return 2;
+    }
+}
+
+int tcrg_bias_torque(const TcrgContext* context, const TcrgModel* model,
+                     const TcrgTerrain* terrain, const TcrgBaseState* base,
+                     const TcrgState* state, double bias[4]) {
+    if (context == nullptr || model == nullptr || terrain == nullptr || base == nullptr ||
+        state == nullptr || bias == nullptr) {
+        set_error("参数为空指针");
+        return 1;
+    }
+    try {
+        using namespace tcrg::gimbal_dynamics;
+        using namespace tcrg::gimbal_dynamics::detail;
+        const ScalarModelParameters<double> scalar_model =
+            convert_model<double>(convert_model(*model));
+        const ScalarTerrain<double> scalar_terrain =
+            convert_terrain<double>(convert_terrain(*terrain));
+        const BaseStateT<double> base_state = convert_base(*base);
+        const simulation::StateT<double> state_value = convert_state(*state);
+        Vector4<double> q;
+        for (int i = 0; i < 4; ++i) {
+            q[i] = state_value.angle[i];
+        }
+        const Vector4<double> qdot = Vector4<double>::zero();
+        const Chain<double> chain = evaluate_chain(scalar_model, scalar_terrain, base_state, q);
+        MassInternals<double> mass_internals;
+        evaluate_mass_matrix(scalar_model, chain, &mass_internals);
+        const Vector4<double> bias_value =
+            evaluate_bias(scalar_model, chain, base_state, qdot,
+                          static_cast<BiasInternals<double>*>(nullptr), &mass_internals);
+        for (int i = 0; i < 4; ++i) {
+            bias[i] = bias_value[i];
+        }
         return 0;
     } catch (const std::exception& error) {
         set_error(error.what());
