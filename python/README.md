@@ -47,7 +47,7 @@ python3 ui.py
 
 力矩模式：按住某个键时对应关节持续施加 ±1 N·m，松开后回到 0。
 
-PID 模式：按住某个键时对应关节的位置目标以 `params.PID_TARGET_RATE`（默认 0.5 rad/s）
+PID 模式：按住某个键时对应关节的位置目标以 `params.PID_TARGET_RATE`（默认 1.5 rad/s）
 的速度移动，松开后目标停止；PID 根据位置误差计算力矩，并叠加由 C 接口
 `tcrg_bias_torque` 给出的重力/底盘运动前馈。PID 增益、目标限幅、力矩限幅均在
 `params.py` 中设置。切换模式时目标会重置为当前关节角，不会产生跳变。
