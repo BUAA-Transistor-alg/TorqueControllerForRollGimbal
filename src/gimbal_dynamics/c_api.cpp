@@ -337,6 +337,98 @@ int tcrg_parameter_gradient(const TcrgContext* context, const TcrgModel* model,
     }
 }
 
+int tcrg_inertial_basis(const TcrgContext* context, const TcrgModel* model,
+                        const TcrgTerrain* terrain, const TcrgBaseState* base,
+                        const TcrgState* state, const double qdd[4], double basis[44][4]) {
+    if (context == nullptr || model == nullptr || terrain == nullptr || base == nullptr ||
+        state == nullptr || qdd == nullptr || basis == nullptr) {
+        set_error("参数为空指针");
+        return 1;
+    }
+    try {
+        using namespace tcrg::gimbal_dynamics;
+        using namespace tcrg::gimbal_dynamics::detail;
+        const ScalarModelParameters<double> template_model =
+            convert_model<double>(convert_model(*model));
+        const ScalarTerrain<double> scalar_terrain =
+            convert_terrain<double>(convert_terrain(*terrain));
+        const BaseStateT<double> base_state = convert_base(*base);
+        const simulation::StateT<double> state_value = convert_state(*state);
+        Vector4<double> q;
+        Vector4<double> qdot;
+        Vector4<double> qdd_value;
+        for (int i = 0; i < 4; ++i) {
+            q[i] = state_value.angle[i];
+            qdot[i] = state_value.velocity[i];
+            qdd_value[i] = qdd[i];
+        }
+        const Chain<double> chain = evaluate_chain(template_model, scalar_terrain, base_state, q);
+        const auto torque_of = [&](const ScalarModelParameters<double>& candidate) {
+            MassInternals<double> internals;
+            const Matrix4<double> mass = evaluate_mass_matrix(candidate, chain, &internals);
+            const Vector4<double> bias = evaluate_bias(
+                candidate, chain, base_state, qdot,
+                static_cast<BiasInternals<double>*>(nullptr), &internals);
+            Vector4<double> result = bias;
+            for (int r = 0; r < 4; ++r) {
+                for (int c = 0; c < 4; ++c) {
+                    result[r] += mass(r, c) * qdd_value[c];
+                }
+                result[r] += candidate.damping[r] * qdot[r];
+            }
+            return result;
+        };
+        ScalarModelParameters<double> zero;
+        zero.joint_offsets = template_model.joint_offsets;
+        zero.gravity = template_model.gravity;
+        for (int body = 0; body < 4; ++body) {
+            ScalarModelParameters<double> mass_model = zero;
+            mass_model.bodies[body].mass = 1.0;
+            const Vector4<double> mass_torque = torque_of(mass_model);
+            for (int joint = 0; joint < 4; ++joint) {
+                basis[body * 10][joint] = mass_torque[joint];
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                ScalarModelParameters<double> shifted = zero;
+                shifted.bodies[body].mass = 1.0;
+                shifted.bodies[body].com = Vector3<double>::zero();
+                shifted.bodies[body].com[axis] = 1.0;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        shifted.bodies[body].inertia(r, c) =
+                            shifted.bodies[body].com[r] * shifted.bodies[body].com[c] -
+                            (r == c ? 1.0 : 0.0);
+                    }
+                }
+                const Vector4<double> value = torque_of(shifted);
+                for (int joint = 0; joint < 4; ++joint) {
+                    basis[body * 10 + 1 + axis][joint] =
+                        value[joint] - mass_torque[joint];
+                }
+            }
+            const int positions[6][2] = {{0, 0}, {1, 1}, {2, 2}, {0, 1}, {0, 2}, {1, 2}};
+            for (int slot = 0; slot < 6; ++slot) {
+                ScalarModelParameters<double> inertia_model = zero;
+                inertia_model.bodies[body].inertia(positions[slot][0], positions[slot][1]) = 1.0;
+                inertia_model.bodies[body].inertia(positions[slot][1], positions[slot][0]) = 1.0;
+                const Vector4<double> value = torque_of(inertia_model);
+                for (int joint = 0; joint < 4; ++joint) {
+                    basis[body * 10 + 4 + slot][joint] = value[joint];
+                }
+            }
+        }
+        for (int joint = 0; joint < 4; ++joint) {
+            for (int row = 0; row < 4; ++row) {
+                basis[40 + joint][row] = (row == joint) ? qdot[joint] : 0.0;
+            }
+        }
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return 2;
+    }
+}
+
 const char* tcrg_last_error(void) { return g_last_error.c_str(); }
 
 }  // extern "C"

@@ -145,6 +145,16 @@ _lib.tcrg_parameter_gradient.argtypes = [
     ctypes.POINTER(ctypes.c_double),
 ]
 _lib.tcrg_parameter_gradient.restype = ctypes.c_int
+_lib.tcrg_inertial_basis.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(TcrgModel),
+    ctypes.POINTER(TcrgTerrain),
+    ctypes.POINTER(TcrgBaseState),
+    ctypes.POINTER(TcrgState),
+    ctypes.POINTER(ctypes.c_double),
+    ctypes.POINTER(ctypes.c_double),
+]
+_lib.tcrg_inertial_basis.restype = ctypes.c_int
 _lib.tcrg_last_error.argtypes = []
 _lib.tcrg_last_error.restype = ctypes.c_char_p
 
@@ -337,6 +347,24 @@ class Context:
         if result != 0:
             raise _error()
         return loss_value.value, [gradient_array[i] for i in range(56)], final_state
+
+    def inertial_basis(self, model: TcrgModel, terrain: TcrgTerrain,
+                       base: TcrgBaseState, state: TcrgState,
+                       qdd: Sequence[float]) -> List[List[float]]:
+        acceleration = (ctypes.c_double * 4)(*[float(value) for value in qdd])
+        values = (ctypes.c_double * (44 * 4))()
+        result = _lib.tcrg_inertial_basis(
+            self._context,
+            ctypes.byref(model),
+            ctypes.byref(terrain),
+            ctypes.byref(base),
+            ctypes.byref(state),
+            acceleration,
+            values,
+        )
+        if result != 0:
+            raise _error()
+        return [[values[column * 4 + row] for row in range(4)] for column in range(44)]
 
     def inverse_dynamics(self, model: TcrgModel, terrain: TcrgTerrain,
                          base: TcrgBaseState, state: TcrgState,

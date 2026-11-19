@@ -87,6 +87,12 @@ int tcrg_parameter_gradient(const TcrgContext* context, const TcrgModel* model,
                             const TcrgLossSpec* loss_spec, double* loss,
                             TcrgState* final_state, double gradient[56]);
 
+// 40 个惯性基参数（每个刚体 m、h、I_o 的 10 个分量）与 4 个阻尼参数的
+// 逆动力学基矩阵。basis 的行顺序为 4 个关节力矩，列顺序为 44 个参数。
+int tcrg_inertial_basis(const TcrgContext* context, const TcrgModel* model,
+                        const TcrgTerrain* terrain, const TcrgBaseState* base,
+                        const TcrgState* state, const double qdd[4], double basis[44][4]);
+
 // 最近一次失败的说明；没有失败时为空字符串。
 const char* tcrg_last_error(void);
 

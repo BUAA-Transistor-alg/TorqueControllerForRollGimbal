@@ -34,7 +34,7 @@ FIXED_BETA = (21, 22)  # o1.x、o1.y
 
 def mapping_jacobian(beta: np.ndarray) -> np.ndarray:
     T = np.zeros((56, 35))
-    m1 = params.MASSES[0]
+    m1 = 1.0
     cx, cy = beta[1] / m1, beta[2] / m1
     T[4, 1] = 1.0 / m1
     T[5, 2] = 1.0 / m1
@@ -162,7 +162,10 @@ def project(reduced: np.ndarray) -> np.ndarray:
 def curriculum(data: Data, arguments) -> None:
     beta0 = ip.beta_of_prior()
     reference = beta0[KEEP].copy()
-    reduced = project(reference + 0.02 * ip.beta_scales()[KEEP])
+    if arguments.init is not None:
+        reduced = project(np.load(arguments.init)["reduced"].copy())
+    else:
+        reduced = project(reference + arguments.start_perturb * ip.beta_scales()[KEEP])
     scale = ip.beta_scales()[KEEP]
     steps_list = [int(value) for value in arguments.stages.split(",") if value]
     moment = np.zeros_like(reduced)
@@ -230,6 +233,7 @@ def curriculum(data: Data, arguments) -> None:
                 print("课程段 %d/%d，迭代 %d，步数 %d，拒绝更新，损失 %.6e，步长 %.2e" % (
                     stage + 1, len(steps_list), iteration + 1, steps,
                     total_loss, learning_rate))
+            learning_rate = max(learning_rate * arguments.decay, 1.0e-7)
     full_steps = min(steps_list[-1], data.q.shape[1])
     total_loss = 0.0
     for segment in range(segment_count):
@@ -344,8 +348,11 @@ def main() -> None:
     parser.add_argument("--segments", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=0.002)
     parser.add_argument("--regularization", type=float, default=0.01)
+    parser.add_argument("--start-perturb", type=float, default=0.02)
+    parser.add_argument("--decay", type=float, default=0.995)
     parser.add_argument("--stages", type=str, default="40,80,160,300")
     parser.add_argument("--save", type=Path, default=Path("data/identified_beta.npz"))
+    parser.add_argument("--init", type=Path, default=None)
     parser.add_argument("--data", type=Path, default=Path("data/identification_data.npz"))
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--segment", type=int, default=0)

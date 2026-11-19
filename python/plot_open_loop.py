@@ -71,8 +71,11 @@ def main() -> None:
     for axis in axes[-1, :]:
         axis.set_xlabel("time (s)")
     axes[0, 0].legend(loc="best")
-    figure.suptitle("Open-loop joint angles: true vs identified parameters (segment 0, 3 s)",
-                    y=0.985)
+    figure.suptitle(
+        "Open-loop joint angles: true vs identified parameters (segment %d, %.2f s)"
+        % (arguments.segment, arguments.steps * 0.01),
+        y=0.985,
+    )
     figure.tight_layout()
     figure.subplots_adjust(top=0.90)
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
