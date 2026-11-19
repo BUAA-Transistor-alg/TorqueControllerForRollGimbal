@@ -247,7 +247,38 @@ def curriculum(data: Data, arguments) -> None:
     print("相对初始基参数映射的原始参数变化前 10：")
     for index in np.argsort(np.abs(error))[::-1][:10]:
         print("  %-18s %+.6e" % (names[index], error[index]))
+    print("各基参数误差（真值 / 估计 / 绝对误差 / 尺度归一化误差）：")
+    names = base_names()
+    for index in range(reduced.size):
+        print("  %-14s 真值 % .6e  估计 % .6e  误差 % .6e  归一化 % .4f" % (
+            names[index], reference[index], reduced[index],
+            reduced[index] - reference[index],
+            (reduced[index] - reference[index]) / scale[index]))
+    arguments.save.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        arguments.save,
+        reduced=reduced,
+        reference=reference,
+        scale=scale,
+        keep=KEEP,
+        full_beta=expand_beta(reduced),
+        model=ip.map_beta(expand_beta(reduced), True),
+        stages=np.array(steps_list),
+        final_loss=total_loss / segment_count,
+    )
+    print("辨识参数已保存到", arguments.save)
 
+
+
+def base_names() -> list[str]:
+    names = ["B1.beta1", "B1.beta2", "B1.beta3"]
+    for body in range(2, 5):
+        names += [f"B{body}.m", f"B{body}.hx", f"B{body}.hy", f"B{body}.hz",
+                  f"B{body}.a_I_a", f"B{body}.diff"]
+    names += ["o1.x", "o1.y", "o2.x", "o2.y",
+              "o3.x", "o3.y", "o3.z", "o4.x", "o4.y", "o4.z"]
+    names += ["d1", "d2", "d3", "d4"]
+    return [name for index, name in enumerate(names) if index not in FIXED_BETA]
 
 
 def expand_beta(reduced: np.ndarray) -> np.ndarray:
@@ -314,6 +345,7 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=0.002)
     parser.add_argument("--regularization", type=float, default=0.01)
     parser.add_argument("--stages", type=str, default="40,80,160,300")
+    parser.add_argument("--save", type=Path, default=Path("data/identified_beta.npz"))
     parser.add_argument("--data", type=Path, default=Path("data/identification_data.npz"))
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--segment", type=int, default=0)
