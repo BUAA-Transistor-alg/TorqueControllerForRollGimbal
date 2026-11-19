@@ -214,6 +214,54 @@ int tcrg_bias_torque(const TcrgContext* context, const TcrgModel* model,
     }
 }
 
+int tcrg_inverse_dynamics(const TcrgContext* context, const TcrgModel* model,
+                          const TcrgTerrain* terrain, const TcrgBaseState* base,
+                          const TcrgState* state, const double qdd[4], double torque[4]) {
+    if (context == nullptr || model == nullptr || terrain == nullptr || base == nullptr ||
+        state == nullptr || qdd == nullptr || torque == nullptr) {
+        set_error("参数为空指针");
+        return 1;
+    }
+    try {
+        using namespace tcrg::gimbal_dynamics;
+        using namespace tcrg::gimbal_dynamics::detail;
+        const ScalarModelParameters<double> scalar_model =
+            convert_model<double>(convert_model(*model));
+        const ScalarTerrain<double> scalar_terrain =
+            convert_terrain<double>(convert_terrain(*terrain));
+        const BaseStateT<double> base_state = convert_base(*base);
+        const simulation::StateT<double> state_value = convert_state(*state);
+        Vector4<double> q;
+        Vector4<double> qdot;
+        Vector4<double> qdd_value;
+        for (int i = 0; i < 4; ++i) {
+            q[i] = state_value.angle[i];
+            qdot[i] = state_value.velocity[i];
+            qdd_value[i] = qdd[i];
+        }
+        const Chain<double> chain = evaluate_chain(scalar_model, scalar_terrain, base_state, q);
+        MassInternals<double> mass_internals;
+        const Matrix4<double> mass = evaluate_mass_matrix(scalar_model, chain, &mass_internals);
+        const Vector4<double> bias_value = evaluate_bias(
+            scalar_model, chain, base_state, qdot,
+            static_cast<BiasInternals<double>*>(nullptr), &mass_internals);
+        Vector4<double> result = bias_value;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                result[r] += mass(r, c) * qdd_value[c];
+            }
+            result[r] += scalar_model.damping[r] * qdot[r];
+        }
+        for (int i = 0; i < 4; ++i) {
+            torque[i] = result[i];
+        }
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return 2;
+    }
+}
+
 const char* tcrg_last_error(void) { return g_last_error.c_str(); }
 
 }  // extern "C"

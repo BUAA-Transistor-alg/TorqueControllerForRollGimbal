@@ -109,6 +109,16 @@ _lib.tcrg_bias_torque.argtypes = [
     ctypes.POINTER(ctypes.c_double),
 ]
 _lib.tcrg_bias_torque.restype = ctypes.c_int
+_lib.tcrg_inverse_dynamics.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(TcrgModel),
+    ctypes.POINTER(TcrgTerrain),
+    ctypes.POINTER(TcrgBaseState),
+    ctypes.POINTER(TcrgState),
+    ctypes.POINTER(ctypes.c_double),
+    ctypes.POINTER(ctypes.c_double),
+]
+_lib.tcrg_inverse_dynamics.restype = ctypes.c_int
 _lib.tcrg_last_error.argtypes = []
 _lib.tcrg_last_error.restype = ctypes.c_char_p
 
@@ -236,6 +246,24 @@ class Context:
             ctypes.byref(terrain),
             ctypes.byref(base),
             ctypes.byref(state),
+            values,
+        )
+        if result != 0:
+            raise _error()
+        return [values[i] for i in range(4)]
+
+    def inverse_dynamics(self, model: TcrgModel, terrain: TcrgTerrain,
+                         base: TcrgBaseState, state: TcrgState,
+                         qdd: Sequence[float]) -> List[float]:
+        acceleration = (ctypes.c_double * 4)(*[float(value) for value in qdd])
+        values = (ctypes.c_double * 4)()
+        result = _lib.tcrg_inverse_dynamics(
+            self._context,
+            ctypes.byref(model),
+            ctypes.byref(terrain),
+            ctypes.byref(base),
+            ctypes.byref(state),
+            acceleration,
             values,
         )
         if result != 0:

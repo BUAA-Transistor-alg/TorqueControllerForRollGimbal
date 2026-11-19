@@ -63,6 +63,12 @@ int tcrg_bias_torque(const TcrgContext* context, const TcrgModel* model,
                      const TcrgTerrain* terrain, const TcrgBaseState* base,
                      const TcrgState* state, double bias[4]);
 
+// 逆动力学：给定状态与关节角加速度，返回所需关节力矩。
+// torque = M(q) qdd + D qdot + b(q, qdot, base)，长度 4。
+int tcrg_inverse_dynamics(const TcrgContext* context, const TcrgModel* model,
+                          const TcrgTerrain* terrain, const TcrgBaseState* base,
+                          const TcrgState* state, const double qdd[4], double torque[4]);
+
 // 最近一次失败的说明；没有失败时为空字符串。
 const char* tcrg_last_error(void);
 

@@ -91,6 +91,21 @@ int main(void) {
         return 1;
     }
     memset(&state, 0, sizeof(state));
+    double qdd[4] = {0.0, 0.0, 0.0, 0.0};
+    double inverse_torque[4] = {0.0, 0.0, 0.0, 0.0};
+    if (tcrg_inverse_dynamics(context, &model, &terrain, &base, &state, qdd,
+                              inverse_torque) != 0) {
+        printf("逆动力学失败: %s\n", tcrg_last_error());
+        tcrg_context_destroy(context);
+        return 1;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (!isfinite(inverse_torque[i])) {
+            printf("逆动力学结果不是有限值\n");
+            tcrg_context_destroy(context);
+            return 1;
+        }
+    }
     double bias[4] = {0.0, 0.0, 0.0, 0.0};
     if (tcrg_bias_torque(context, &model, &terrain, &base, &state, bias) != 0) {
         printf("偏置力矩失败: %s\n", tcrg_last_error());
