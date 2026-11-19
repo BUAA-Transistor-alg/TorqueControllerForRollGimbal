@@ -131,6 +131,58 @@ python3 identify_physical.py --segments 24 --stride 6 --max-nfev 12
 
 在 24 段数据、每 6 个点取一个样本、固定 `o1.x = o1.y = 0` 的条件下，代价从 `8.90e-1` 降到 `2.59e-3`，最终残差最大约 `6.7e-3 N·m`，与真值处由离散差分造成的 `8.5e-3 N·m` 残差处于同一量级。被规范固定的 B1 非轴向惯量、`B1.com_z`、`o1.z`、`o2.z` 不对应真值；其余参数中 `B1.inertia_zz`、`B3.mass`、`B3.com_z`、`B4.com_y`、`d2` 等误差在 3% 到 10% 量级，B2 的 `com_z` 与 B3 的 `com_x` 误差较大，这是静态底盘数据对相应方向激励不足造成的。
 
+## 参数灵敏度梯度下降
+
+C 接口新增：
+
+```c
+int tcrg_parameter_gradient(const TcrgContext* context, const TcrgModel* model,
+                            const TcrgTerrain* terrain, const TcrgBaseState* base,
+                            const TcrgState* initial, const double* torque,
+                            size_t num_steps, double step, int refinement,
+                            const TcrgLossSpec* loss_spec, double* loss,
+                            TcrgState* final_state, double gradient[56]);
+```
+
+它调用库里的参数灵敏度实现，返回轨迹损失对 56 个原始参数的梯度。库内参数按每个刚体连续 10 个排列，`gradient_fit.py` 用 `PERM` 把它置换到本项目分组布局。
+
+重参数化梯度由链式法则给出：
+
+```text
+dL/dbeta = T^T dL/dx
+T = dx/dbeta
+```
+
+`gradient_fit.py` 单独实现了 `T` 的解析表达式，并做两项差分校验：
+
+```bash
+python3 gradient_fit.py --check-jacobian
+python3 gradient_fit.py --check-loss-gradient --steps 60
+```
+
+结果：
+
+```text
+映射雅可比最大绝对误差      2.88e-11
+基参数损失梯度最大绝对误差  1.33e-06
+```
+
+课程学习优化：
+
+```bash
+python3 gradient_fit.py --optimize --segments 3 --iterations 4 \
+    --stages 10,20,40 --learning-rate 0.001 --regularization 0.001
+```
+
+优化器使用 Adam，更新量为 `u = beta / scale`，带 L2 正则、梯度范数裁剪与回溯接受准则。短段课程的结果：
+
+```text
+步数 20：损失 6.58e-03 -> 2.17e-03
+步数 40：损失 8.21e-03 -> 3.35e-03
+```
+
+在更长的段上，开环力矩序列对参数误差非常敏感：参数稍微偏离 CAD 值就会使 3 s 轨迹发散，长段损失迅速增大，回溯会拒绝这些更新。要完成全 3 s 的梯度优化，需要闭环数据或更强的轨迹稳定约束。
+
 ## 参数说明
 
 `params.py` 中的惯量是绕质心的标准惯性张量（非对角项为 `-∫x_i x_j dm`），

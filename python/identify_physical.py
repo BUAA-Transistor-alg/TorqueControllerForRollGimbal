@@ -99,9 +99,10 @@ def map_beta(beta: np.ndarray, fix_origin_xy: bool) -> np.ndarray:
     beta1, beta2, beta3 = beta[0], beta[1], beta[2]
     x[0] = m1
     cx, cy = beta2 / m1, beta3 / m1
-    x[4], x[5], x[6] = cx, cy, 0.0
-    gauge_xx = 1.0e-4
-    x[16:22] = [gauge_xx, gauge_xx, beta1 - m1 * (cx * cx + cy * cy), 0.0, 0.0, 0.0]
+    x[4], x[5], x[6] = cx, cy, params.COM[0][2]
+    prior = params.INERTIA[0]
+    x[16:22] = [prior[0], prior[1], beta1 - m1 * (cx * cx + cy * cy),
+                prior[3], prior[4], prior[5]]
     position = 3
     for i in range(1, 4):
         m = beta[position]
@@ -117,20 +118,25 @@ def map_beta(beta: np.ndarray, fix_origin_xy: bool) -> np.ndarray:
         difference = beta[position] - m * ((q @ c) ** 2 - (p @ c) ** 2)
         position += 1
         prior_inertia = inertia_matrix(i)
-        prior_trace = float(p @ prior_inertia @ p + q @ prior_inertia @ q)
-        trace = max(prior_trace, 1.5 * abs(difference) + 1.0e-6, 1.0e-6)
+        gauge_trace = float(p @ prior_inertia @ p + q @ prior_inertia @ q)
+        gauge_pq = float(p @ prior_inertia @ q)
+        gauge_ap = float(a @ prior_inertia @ p)
+        gauge_aq = float(a @ prior_inertia @ q)
         inertia = (longitudinal * np.outer(a, a)
-                   + 0.5 * (trace + difference) * np.outer(p, p)
-                   + 0.5 * (trace - difference) * np.outer(q, q))
+                   + 0.5 * (gauge_trace + difference) * np.outer(p, p)
+                   + 0.5 * (gauge_trace - difference) * np.outer(q, q)
+                   + gauge_pq * (np.outer(p, q) + np.outer(q, p))
+                   + gauge_ap * (np.outer(a, p) + np.outer(p, a))
+                   + gauge_aq * (np.outer(a, q) + np.outer(q, a)))
         x[16 + 6 * i:22 + 6 * i] = [inertia[0, 0], inertia[1, 1], inertia[2, 2],
                                     inertia[0, 1], inertia[0, 2], inertia[1, 2]]
     offsets = beta[position:position + 10]
     x[40] = 0.0 if fix_origin_xy else offsets[0]
     x[41] = 0.0 if fix_origin_xy else offsets[1]
-    x[42] = 0.0
+    x[42] = params.JOINT_OFFSETS[0][2]
     x[43] = offsets[2]
     x[44] = offsets[3]
-    x[45] = 0.0
+    x[45] = params.JOINT_OFFSETS[1][2]
     x[46], x[47], x[48] = offsets[4], offsets[5], offsets[6]
     x[49], x[50], x[51] = offsets[7], offsets[8], offsets[9]
     x[52:56] = beta[position + 10:position + 14]

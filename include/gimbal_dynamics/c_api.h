@@ -39,6 +39,15 @@ typedef struct TcrgTerrain {
     double slope_direction;
 } TcrgTerrain;
 
+// 参数梯度使用的轨迹损失权重与目标轨迹（target 长度均为 num_steps*4）。
+typedef struct TcrgLossSpec {
+    double angle_weights[4];
+    double velocity_weights[4];
+    double torque_weights[4];
+    const double* target_angle;
+    const double* target_velocity;
+} TcrgLossSpec;
+
 // 创建/销毁上下文；thread_count 为参与前向仿真的总线程数（含调用线程），1 表示串行。
 TcrgContext* tcrg_context_create(int thread_count);
 void tcrg_context_destroy(TcrgContext* context);
@@ -68,6 +77,15 @@ int tcrg_bias_torque(const TcrgContext* context, const TcrgModel* model,
 int tcrg_inverse_dynamics(const TcrgContext* context, const TcrgModel* model,
                           const TcrgTerrain* terrain, const TcrgBaseState* base,
                           const TcrgState* state, const double qdd[4], double torque[4]);
+
+// 参数灵敏度：返回损失、损失对 56 个原始参数的梯度以及末端状态。
+// torque 长度为 num_steps*4；target 由 loss_spec 指定。
+int tcrg_parameter_gradient(const TcrgContext* context, const TcrgModel* model,
+                            const TcrgTerrain* terrain, const TcrgBaseState* base,
+                            const TcrgState* initial, const double* torque,
+                            size_t num_steps, double step, int refinement,
+                            const TcrgLossSpec* loss_spec, double* loss,
+                            TcrgState* final_state, double gradient[56]);
 
 // 最近一次失败的说明；没有失败时为空字符串。
 const char* tcrg_last_error(void);

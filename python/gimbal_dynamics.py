@@ -49,6 +49,16 @@ class TcrgTerrain(ctypes.Structure):
     ]
 
 
+class TcrgLossSpec(ctypes.Structure):
+    _fields_ = [
+        ("angle_weights", ctypes.c_double * 4),
+        ("velocity_weights", ctypes.c_double * 4),
+        ("torque_weights", ctypes.c_double * 4),
+        ("target_angle", ctypes.POINTER(ctypes.c_double)),
+        ("target_velocity", ctypes.POINTER(ctypes.c_double)),
+    ]
+
+
 def _find_library() -> str:
     environment = os.environ.get("GIMBAL_DYNAMICS_LIB")
     if environment:
@@ -119,6 +129,22 @@ _lib.tcrg_inverse_dynamics.argtypes = [
     ctypes.POINTER(ctypes.c_double),
 ]
 _lib.tcrg_inverse_dynamics.restype = ctypes.c_int
+_lib.tcrg_parameter_gradient.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(TcrgModel),
+    ctypes.POINTER(TcrgTerrain),
+    ctypes.POINTER(TcrgBaseState),
+    ctypes.POINTER(TcrgState),
+    ctypes.POINTER(ctypes.c_double),
+    ctypes.c_size_t,
+    ctypes.c_double,
+    ctypes.c_int,
+    ctypes.POINTER(TcrgLossSpec),
+    ctypes.POINTER(ctypes.c_double),
+    ctypes.POINTER(TcrgState),
+    ctypes.POINTER(ctypes.c_double),
+]
+_lib.tcrg_parameter_gradient.restype = ctypes.c_int
 _lib.tcrg_last_error.argtypes = []
 _lib.tcrg_last_error.restype = ctypes.c_char_p
 
@@ -251,6 +277,66 @@ class Context:
         if result != 0:
             raise _error()
         return [values[i] for i in range(4)]
+
+    def parameter_gradient(
+        self,
+        model: TcrgModel,
+        terrain: TcrgTerrain,
+        base: TcrgBaseState,
+        initial: TcrgState,
+        torques: Sequence[Sequence[float]],
+        target_angle: Sequence[Sequence[float]] | None,
+        target_velocity: Sequence[Sequence[float]] | None,
+        angle_weights: Sequence[float],
+        velocity_weights: Sequence[float],
+        torque_weights: Sequence[float],
+        step: float,
+        refinement: int,
+    ):
+        count = len(torques)
+        torque_array = (ctypes.c_double * (count * 4))(
+            *[float(value) for row in torques for value in row]
+        )
+        angle_array = None
+        velocity_array = None
+        if target_angle is not None:
+            angle_array = (ctypes.c_double * (count * 4))(
+                *[float(value) for row in target_angle for value in row]
+            )
+        if target_velocity is not None:
+            velocity_array = (ctypes.c_double * (count * 4))(
+                *[float(value) for row in target_velocity for value in row]
+            )
+        loss_spec = TcrgLossSpec()
+        for i in range(4):
+            loss_spec.angle_weights[i] = float(angle_weights[i])
+            loss_spec.velocity_weights[i] = float(velocity_weights[i])
+            loss_spec.torque_weights[i] = float(torque_weights[i])
+        if angle_array is not None:
+            loss_spec.target_angle = ctypes.cast(angle_array, ctypes.POINTER(ctypes.c_double))
+        if velocity_array is not None:
+            loss_spec.target_velocity = ctypes.cast(velocity_array, ctypes.POINTER(ctypes.c_double))
+        gradient_array = (ctypes.c_double * 56)()
+        loss_value = ctypes.c_double()
+        final_state = TcrgState()
+        result = _lib.tcrg_parameter_gradient(
+            self._context,
+            ctypes.byref(model),
+            ctypes.byref(terrain),
+            ctypes.byref(base),
+            ctypes.byref(initial),
+            torque_array,
+            ctypes.c_size_t(count),
+            ctypes.c_double(float(step)),
+            ctypes.c_int(int(refinement)),
+            ctypes.byref(loss_spec),
+            ctypes.byref(loss_value),
+            ctypes.byref(final_state),
+            gradient_array,
+        )
+        if result != 0:
+            raise _error()
+        return loss_value.value, [gradient_array[i] for i in range(56)], final_state
 
     def inverse_dynamics(self, model: TcrgModel, terrain: TcrgTerrain,
                          base: TcrgBaseState, state: TcrgState,
