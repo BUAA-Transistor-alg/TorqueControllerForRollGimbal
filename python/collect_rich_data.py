@@ -14,6 +14,7 @@ import numpy as np
 
 import gimbal_dynamics as gd
 import params
+from gimbal_env import GimbalEnv
 
 DT = 0.01
 POINTS = 300
@@ -102,15 +103,14 @@ def reference(rng: np.random.Generator, kind: str, strength: float = 1.0):
 def simulate_segment(rng, kind: str, strength: float, slope: float, direction: float,
                      yaw: float, diagnostics=None):
     """生成参考并做一次闭环仿真；返回数据或 None（超出限位）。"""
-    context = gd.Context(1)
-    model = gd.make_model()
+    env = GimbalEnv()
     terrain_seg = gd.make_terrain(slope, direction)
     base = gd.make_base(yaw=yaw)
     target_q, target_v = reference(rng, kind, strength)
     q = np.zeros((POINTS, 4))
     qdot = np.zeros((POINTS, 4))
     tau = np.zeros((POINTS, 4))
-    state = gd.make_state(target_q[0], target_v[0])
+    observation = env.reset(target_q[0], target_v[0], terrain=terrain_seg, base=base)
     # roll 是倒立摆，增益过低会让闭环失稳，因此 roll 的增益缩放取下界更高
     kp_scale = rng.uniform(0.8, 1.5, 4)
     kp_scale[1] = rng.uniform(1.0, 1.6)
@@ -122,21 +122,21 @@ def simulate_segment(rng, kind: str, strength: float, slope: float, direction: f
     integral_clip = 1.0
     saturation = 0
     for k in range(POINTS):
-        current = np.array([state.angle[i] for i in range(4)])
-        velocity = np.array([state.velocity[i] for i in range(4)])
+        current = observation.angle
+        velocity = observation.velocity
         q[k] = current
         qdot[k] = velocity
         error = target_q[k] - current
         integral = np.clip(integral + error * DT, -integral_clip, integral_clip)
-        feedforward = np.asarray(context.bias_torque(model, terrain_seg, base, state))
+        feedforward = env.bias_torque()
         command = (feedforward + gains_kp * error + gains_ki * integral
                    + gains_kd * (target_v[k] - velocity))
         limited = np.clip(command, -limit, limit)
         saturation += int(np.sum(np.abs(command) > limit + 1.0e-9))
         tau[k] = limited
         if k + 1 < POINTS:
-            state = context.forward_step(model, terrain_seg, base, state, limited, DT, 2)
-    context.close()
+            observation = env.step(limited)
+    env.close()
     for joint in (1, 2, 3):
         low, high = LIMITS[joint]
         if np.any(q[:, joint] < low) or np.any(q[:, joint] > high):

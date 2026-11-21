@@ -10,6 +10,7 @@ import numpy as np
 
 import gimbal_dynamics as gd
 import params
+from gimbal_env import GimbalEnv
 
 DT = 0.01
 POINTS = 300
@@ -48,8 +49,7 @@ def reference(rng: np.random.Generator, points: int):
 
 def collect(segments: int, seed: int, output: Path) -> None:
     rng = np.random.default_rng(seed)
-    context = gd.Context(1)
-    model = gd.make_model()
+    env = GimbalEnv()
     q = np.zeros((segments, POINTS, 4))
     qdot = np.zeros((segments, POINTS, 4))
     tau = np.zeros((segments, POINTS, 4))
@@ -72,31 +72,32 @@ def collect(segments: int, seed: int, output: Path) -> None:
         yaw = rng.uniform(-math.pi, math.pi)
         terrain_seg = gd.make_terrain(slope, direction)
         base = gd.make_base(yaw=yaw)
-        state = gd.make_state(target_q[0], target_v[0])
+        initial_value = env.reset(target_q[0], target_v[0], terrain=terrain_seg, base=base)
         gains_kp = np.array([8.0, 2.0, 2.0, 2.0]) * rng.uniform(0.8, 1.2, 4)
         gains_ki = np.array([0.2, 0.2, 0.2, 0.2]) * rng.uniform(0.7, 1.3, 4)
         gains_kd = np.array([0.5, 0.2, 0.15, 0.1]) * rng.uniform(0.8, 1.2, 4)
         limit = 10.0
         integral = np.zeros(4)
         integral_clip = 1.0
+        observation = initial_value
         for k in range(POINTS):
-            q[segment, k] = [state.angle[i] for i in range(4)]
-            qdot[segment, k] = [state.velocity[i] for i in range(4)]
+            q[segment, k] = observation.angle
+            qdot[segment, k] = observation.velocity
             target[segment, k] = target_q[k]
             target_velocity[segment, k] = target_v[k]
             error = target_q[k] - q[segment, k]
             integral = np.clip(integral + error * DT, -integral_clip, integral_clip)
-            feedforward = context.bias_torque(model, terrain_seg, base, state)
+            feedforward = env.bias_torque()
             command = (feedforward + gains_kp * error + gains_ki * integral
                        + gains_kd * (target_v[k] - qdot[segment, k]))
             command = np.clip(command, -limit, limit)
             tau[segment, k] = command
             if k + 1 < POINTS:
-                state = context.forward_step(model, terrain_seg, base, state, command, DT, 2)
+                observation = env.step(command)
         terrain[segment] = [slope, direction]
         base_yaw[segment] = yaw
-        initial[segment] = target_q[0]
-        initial_velocity[segment] = target_v[0]
+        initial[segment] = initial_value.angle
+        initial_velocity[segment] = initial_value.velocity
         kp[segment] = gains_kp
         ki[segment] = gains_ki
         kd[segment] = gains_kd
@@ -106,7 +107,7 @@ def collect(segments: int, seed: int, output: Path) -> None:
                 np.any(q[segment, :, 2] < SMALL_YAW_LIMIT[0]) or np.any(q[segment, :, 2] > SMALL_YAW_LIMIT[1]) or
                 np.any(q[segment, :, 3] < PITCH_LIMIT[0]) or np.any(q[segment, :, 3] > PITCH_LIMIT[1])):
             raise RuntimeError(f"第 {segment} 段超出关节限位")
-    context.close()
+    env.close()
 
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(

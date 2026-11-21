@@ -15,6 +15,7 @@ import numpy as np
 
 import gimbal_dynamics as gd
 import params
+from gimbal_env import GimbalEnv
 
 DT = 0.01
 POINTS = 300
@@ -67,8 +68,7 @@ def base_sequence(rng, yaw_amplitude, yaw_frequency, slip_amplitude, slip_freque
 
 def simulate_segment(rng, yaw_amplitude, yaw_frequency, slip_amplitude, slip_frequency,
                      tilt_limit, gain_scale):
-    context = gd.Context(1)
-    model = gd.make_model()
+    env = GimbalEnv()
     slope = rng.uniform(0.0, tilt_limit)
     direction = rng.uniform(0.0, 2.0 * math.pi)
     terrain = gd.make_terrain(slope, direction)
@@ -78,7 +78,10 @@ def simulate_segment(rng, yaw_amplitude, yaw_frequency, slip_amplitude, slip_fre
     gains_kp = np.array([8.0, 2.0, 2.0, 2.0]) * gain_scale * rng.uniform(0.9, 1.1, 4)
     gains_ki = np.array([0.2] * 4) * gain_scale * rng.uniform(0.9, 1.1, 4)
     gains_kd = np.array([0.5, 0.2, 0.15, 0.1]) * gain_scale * rng.uniform(0.9, 1.1, 4)
-    state = gd.make_state(target_q[0], target_v[0])
+    base = gd.make_base(acceleration=acceleration[0], yaw=float(yaw[0]),
+                        yaw_rate=float(yaw_rate[0]),
+                        yaw_acceleration=float(yaw_acceleration[0]))
+    observation = env.reset(target_q[0], target_v[0], terrain=terrain, base=base)
     q = np.zeros((POINTS, 4))
     qdot = np.zeros((POINTS, 4))
     tau = np.zeros((POINTS, 4))
@@ -87,19 +90,20 @@ def simulate_segment(rng, yaw_amplitude, yaw_frequency, slip_amplitude, slip_fre
         base = gd.make_base(acceleration=acceleration[k], yaw=float(yaw[k]),
                             yaw_rate=float(yaw_rate[k]),
                             yaw_acceleration=float(yaw_acceleration[k]))
-        current = np.array([state.angle[i] for i in range(4)])
-        velocity = np.array([state.velocity[i] for i in range(4)])
+        env.set_scene(base=base)
+        current = observation.angle
+        velocity = observation.velocity
         q[k] = current
         qdot[k] = velocity
         error = target_q[k] - current
         integral = np.clip(integral + error * DT, -1.0, 1.0)
-        feedforward = np.asarray(context.bias_torque(model, terrain, base, state))
+        feedforward = env.bias_torque()
         command = np.clip(feedforward + gains_kp * error + gains_ki * integral
                           + gains_kd * (target_v[k] - velocity), -10.0, 10.0)
         tau[k] = command
         if k + 1 < POINTS:
-            state = context.forward_step(model, terrain, base, state, command, DT, 2)
-    context.close()
+            observation = env.step(command)
+    env.close()
     for joint in (1, 2, 3):
         low, high = LIMITS[joint]
         if np.any(q[:, joint] < low) or np.any(q[:, joint] > high):

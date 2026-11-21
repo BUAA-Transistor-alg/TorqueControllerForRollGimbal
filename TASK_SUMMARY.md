@@ -95,6 +95,7 @@
 
 核心：
 
+- `python/gimbal_env.py`：仿真环境，提供 `reset` 与 `step` 接口。`reset` 设置初值状态与场景并返回初值（保存数据时直接使用返回值），`step` 输入控制力矩并返回一步仿真后的状态；另提供 `bias_torque`（控制器前馈）与 `inverse_dynamics`。全部采集脚本通过该环境驱动仿真，只负责目标序列、控制器与记录。
 - `python/param_basis.py`：可辨识基、惯性参数与原始参数互转、物理可行性投影。
 - `python/regressor_fit.py`、`python/regressor_full.py`：平滑算子、噪声传播、解析误差在变量修正与物理约束回归。
 - `python/combine_models.py`：多次独立估计的合并与物理投影。
@@ -102,6 +103,14 @@
 - `python/data/identified_final.npz`：最终模型（`model` 56 维、`identifiable` 28 维可辨识坐标、`basis` 44×28）。
 - `python/data/identified_final.txt`：可读参数清单。
 - `python/data/identified_final_metrics.json`：全部评估指标。
+
+采集脚本：
+
+- `python/collect_data.py`：按参考轨迹的逆动力学力矩推进，采集控制-响应序列。
+- `python/collect_closed_loop.py`：标准协议的闭环 PID 采集。
+- `python/collect_rich_data.py`：强激励闭环采集（更大参考幅值与增益范围）。
+- `python/collect_low_excitation.py`：低激励协议采集（慢分量与快分量分离）。
+- `python/collect_base_motion.py`：带底盘晃动与滑移的采集。
 
 评估与验证：
 

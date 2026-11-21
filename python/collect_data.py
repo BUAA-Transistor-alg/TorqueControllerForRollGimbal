@@ -21,6 +21,7 @@ import numpy as np
 
 import gimbal_dynamics as gd
 import params
+from gimbal_env import GimbalEnv
 
 DT = 0.01
 POINTS = 300
@@ -75,8 +76,7 @@ def reference_trajectory(rng: np.random.Generator, points: int):
 
 def collect(segments: int, seed: int, output: Path) -> None:
     rng = np.random.default_rng(seed)
-    context = gd.Context(1)
-    model = gd.make_model()
+    env = GimbalEnv()
     q = np.zeros((segments, POINTS, 4))
     qdot = np.zeros((segments, POINTS, 4))
     tau = np.zeros((segments, POINTS, 4))
@@ -93,31 +93,21 @@ def collect(segments: int, seed: int, output: Path) -> None:
             yaw = rng.uniform(-math.pi, math.pi)
             terrain_segment = gd.make_terrain(slope_angle, slope_direction)
             base_segment = gd.make_base(yaw=yaw)
-            state = gd.make_state(angles[0], velocities[0])
+            initial_value = env.reset(angles[0], velocities[0], terrain=terrain_segment,
+                                      base=base_segment)
             trajectory_tau = np.zeros((POINTS, 4))
             for k in range(POINTS):
-                trajectory_tau[k, :] = context.inverse_dynamics(
-                    model, terrain_segment, base_segment, state, accelerations[k]
-                )
+                trajectory_tau[k, :] = env.inverse_dynamics(accelerations[k])
                 if k + 1 < POINTS:
-                    state = context.forward_step(
-                        model, terrain_segment, base_segment, state,
-                        trajectory_tau[k], step=DT, refinement=2,
-                    )
+                    env.step(trajectory_tau[k])
             # 实际状态重新用同一组力矩推进并记录
-            state = gd.make_state(angles[0], velocities[0])
+            observation = env.reset(angles[0], velocities[0])
             actual_q = np.zeros((POINTS, 4))
             actual_qdot = np.zeros((POINTS, 4))
             valid = True
             for k in range(POINTS):
-                actual_q[k, 0] = state.angle[0]
-                actual_q[k, 1] = state.angle[1]
-                actual_q[k, 2] = state.angle[2]
-                actual_q[k, 3] = state.angle[3]
-                actual_qdot[k, 0] = state.velocity[0]
-                actual_qdot[k, 1] = state.velocity[1]
-                actual_qdot[k, 2] = state.velocity[2]
-                actual_qdot[k, 3] = state.velocity[3]
+                actual_q[k] = observation.angle
+                actual_qdot[k] = observation.velocity
                 if not (ROLL_LIMIT[0] <= actual_q[k, 1] <= ROLL_LIMIT[1]):
                     valid = False
                     break
@@ -128,22 +118,19 @@ def collect(segments: int, seed: int, output: Path) -> None:
                     valid = False
                     break
                 if k + 1 < POINTS:
-                    state = context.forward_step(
-                        model, terrain_segment, base_segment, state,
-                        trajectory_tau[k], step=DT, refinement=2,
-                    )
+                    observation = env.step(trajectory_tau[k])
             if valid:
                 q[index] = actual_q
                 qdot[index] = actual_qdot
                 tau[index] = trajectory_tau
                 terrain[index] = [slope_angle, slope_direction]
                 base_yaw[index] = yaw
-                initial_angle[index] = angles[0]
-                initial_velocity[index] = velocities[0]
+                initial_angle[index] = initial_value.angle
+                initial_velocity[index] = initial_value.velocity
                 break
         else:
             raise RuntimeError(f"第 {index} 段始终超出关节限位，请降低参考幅值")
-    context.close()
+    env.close()
 
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
