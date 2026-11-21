@@ -72,7 +72,10 @@ def collect(segments: int, seed: int, output: Path) -> None:
         yaw = rng.uniform(-math.pi, math.pi)
         terrain_seg = gd.make_terrain(slope, direction)
         base = gd.make_base(yaw=yaw)
-        initial_value = env.reset(target_q[0], target_v[0], terrain=terrain_seg, base=base)
+        initial_value = env.reset({"angle": target_q[0], "velocity": target_v[0],
+                                   "terrain": {"slope_angle": slope,
+                                               "slope_direction": direction},
+                                   "base": {"yaw": yaw}})
         gains_kp = np.array([8.0, 2.0, 2.0, 2.0]) * rng.uniform(0.8, 1.2, 4)
         gains_ki = np.array([0.2, 0.2, 0.2, 0.2]) * rng.uniform(0.7, 1.3, 4)
         gains_kd = np.array([0.5, 0.2, 0.15, 0.1]) * rng.uniform(0.8, 1.2, 4)
@@ -81,23 +84,25 @@ def collect(segments: int, seed: int, output: Path) -> None:
         integral_clip = 1.0
         observation = initial_value
         for k in range(POINTS):
-            q[segment, k] = observation.angle
-            qdot[segment, k] = observation.velocity
+            q[segment, k] = observation["angle"]
+            qdot[segment, k] = observation["velocity"]
             target[segment, k] = target_q[k]
             target_velocity[segment, k] = target_v[k]
             error = target_q[k] - q[segment, k]
             integral = np.clip(integral + error * DT, -integral_clip, integral_clip)
-            feedforward = env.bias_torque()
+            feedforward = env.feedforward_torque()
             command = (feedforward + gains_kp * error + gains_ki * integral
                        + gains_kd * (target_v[k] - qdot[segment, k]))
             command = np.clip(command, -limit, limit)
-            tau[segment, k] = command
             if k + 1 < POINTS:
-                observation = env.step(command)
+                observation = env.step({"torque": command})
+                tau[segment, k] = observation["torque"]
+            else:
+                tau[segment, k] = command
         terrain[segment] = [slope, direction]
         base_yaw[segment] = yaw
-        initial[segment] = initial_value.angle
-        initial_velocity[segment] = initial_value.velocity
+        initial[segment] = initial_value["angle"]
+        initial_velocity[segment] = initial_value["velocity"]
         kp[segment] = gains_kp
         ki[segment] = gains_ki
         kd[segment] = gains_kd

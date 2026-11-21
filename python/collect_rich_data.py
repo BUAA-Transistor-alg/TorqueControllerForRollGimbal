@@ -110,7 +110,10 @@ def simulate_segment(rng, kind: str, strength: float, slope: float, direction: f
     q = np.zeros((POINTS, 4))
     qdot = np.zeros((POINTS, 4))
     tau = np.zeros((POINTS, 4))
-    observation = env.reset(target_q[0], target_v[0], terrain=terrain_seg, base=base)
+    observation = env.reset({"angle": target_q[0], "velocity": target_v[0],
+                             "terrain": {"slope_angle": slope,
+                                         "slope_direction": direction},
+                             "base": {"yaw": yaw}})
     # roll 是倒立摆，增益过低会让闭环失稳，因此 roll 的增益缩放取下界更高
     kp_scale = rng.uniform(0.8, 1.5, 4)
     kp_scale[1] = rng.uniform(1.0, 1.6)
@@ -122,20 +125,22 @@ def simulate_segment(rng, kind: str, strength: float, slope: float, direction: f
     integral_clip = 1.0
     saturation = 0
     for k in range(POINTS):
-        current = observation.angle
-        velocity = observation.velocity
+        current = observation["angle"]
+        velocity = observation["velocity"]
         q[k] = current
         qdot[k] = velocity
         error = target_q[k] - current
         integral = np.clip(integral + error * DT, -integral_clip, integral_clip)
-        feedforward = env.bias_torque()
+        feedforward = env.feedforward_torque()
         command = (feedforward + gains_kp * error + gains_ki * integral
                    + gains_kd * (target_v[k] - velocity))
         limited = np.clip(command, -limit, limit)
         saturation += int(np.sum(np.abs(command) > limit + 1.0e-9))
-        tau[k] = limited
         if k + 1 < POINTS:
-            observation = env.step(limited)
+            observation = env.step({"torque": limited})
+            tau[k] = observation["torque"]
+        else:
+            tau[k] = limited
     env.close()
     for joint in (1, 2, 3):
         low, high = LIMITS[joint]

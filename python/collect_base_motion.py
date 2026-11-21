@@ -78,31 +78,34 @@ def simulate_segment(rng, yaw_amplitude, yaw_frequency, slip_amplitude, slip_fre
     gains_kp = np.array([8.0, 2.0, 2.0, 2.0]) * gain_scale * rng.uniform(0.9, 1.1, 4)
     gains_ki = np.array([0.2] * 4) * gain_scale * rng.uniform(0.9, 1.1, 4)
     gains_kd = np.array([0.5, 0.2, 0.15, 0.1]) * gain_scale * rng.uniform(0.9, 1.1, 4)
-    base = gd.make_base(acceleration=acceleration[0], yaw=float(yaw[0]),
-                        yaw_rate=float(yaw_rate[0]),
-                        yaw_acceleration=float(yaw_acceleration[0]))
-    observation = env.reset(target_q[0], target_v[0], terrain=terrain, base=base)
+    base_states = [gd.make_base(acceleration=acceleration[k], yaw=float(yaw[k]),
+                                yaw_rate=float(yaw_rate[k]),
+                                yaw_acceleration=float(yaw_acceleration[k]))
+                   for k in range(POINTS)]
+    observation = env.reset({"angle": target_q[0], "velocity": target_v[0],
+                             "terrain": {"slope_angle": slope,
+                                         "slope_direction": direction},
+                             "base": base_states[0],
+                             "base_sequence": base_states})
     q = np.zeros((POINTS, 4))
     qdot = np.zeros((POINTS, 4))
     tau = np.zeros((POINTS, 4))
     integral = np.zeros(4)
     for k in range(POINTS):
-        base = gd.make_base(acceleration=acceleration[k], yaw=float(yaw[k]),
-                            yaw_rate=float(yaw_rate[k]),
-                            yaw_acceleration=float(yaw_acceleration[k]))
-        env.set_scene(base=base)
-        current = observation.angle
-        velocity = observation.velocity
+        current = observation["angle"]
+        velocity = observation["velocity"]
         q[k] = current
         qdot[k] = velocity
         error = target_q[k] - current
         integral = np.clip(integral + error * DT, -1.0, 1.0)
-        feedforward = env.bias_torque()
+        feedforward = env.feedforward_torque()
         command = np.clip(feedforward + gains_kp * error + gains_ki * integral
                           + gains_kd * (target_v[k] - velocity), -10.0, 10.0)
-        tau[k] = command
         if k + 1 < POINTS:
-            observation = env.step(command)
+            observation = env.step({"torque": command})
+            tau[k] = observation["torque"]
+        else:
+            tau[k] = command
     env.close()
     for joint in (1, 2, 3):
         low, high = LIMITS[joint]

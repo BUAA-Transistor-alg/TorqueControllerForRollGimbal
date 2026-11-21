@@ -95,7 +95,7 @@
 
 核心：
 
-- `python/gimbal_env.py`：仿真环境，提供 `reset` 与 `step` 接口。`reset` 设置初值状态与场景并返回初值（保存数据时直接使用返回值），`step` 输入控制力矩并返回一步仿真后的状态；另提供 `bias_torque`（控制器前馈）与 `inverse_dynamics`。全部采集脚本通过该环境驱动仿真，只负责目标序列、控制器与记录。
+- `python/gimbal_env.py`：仿真环境。接口由抽象基类 `Environment` 声明，接入真实环境时实现同一套接口即可。`reset` 接收配置字典（初值角度、速度、地形、底盘、底盘序列、力矩限幅），返回实际采用的观测字典：仿真可能无法完全满足请求（关节角超出限位会被夹取），真实环境同样回报实测值，因此保存数据一律使用返回值。`step` 接收控制字典（`torque`），返回一步后的完整观测，包含每一步都可能变化的关节角、关节角速度、实际施加力矩、坡度、坡向、底盘状态与时间。另提供 `feedforward_torque`（控制器前馈）与 `inverse_dynamics`。全部采集脚本通过该环境驱动仿真，只负责目标序列、控制器与记录。
 - `python/param_basis.py`：可辨识基、惯性参数与原始参数互转、物理可行性投影。
 - `python/regressor_fit.py`、`python/regressor_full.py`：平滑算子、噪声传播、解析误差在变量修正与物理约束回归。
 - `python/combine_models.py`：多次独立估计的合并与物理投影。

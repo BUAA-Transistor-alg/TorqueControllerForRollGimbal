@@ -93,21 +93,23 @@ def collect(segments: int, seed: int, output: Path) -> None:
             yaw = rng.uniform(-math.pi, math.pi)
             terrain_segment = gd.make_terrain(slope_angle, slope_direction)
             base_segment = gd.make_base(yaw=yaw)
-            initial_value = env.reset(angles[0], velocities[0], terrain=terrain_segment,
-                                      base=base_segment)
+            initial_value = env.reset({"angle": angles[0], "velocity": velocities[0],
+                                       "terrain": {"slope_angle": slope_angle,
+                                                   "slope_direction": slope_direction},
+                                       "base": {"yaw": yaw}})
             trajectory_tau = np.zeros((POINTS, 4))
             for k in range(POINTS):
                 trajectory_tau[k, :] = env.inverse_dynamics(accelerations[k])
                 if k + 1 < POINTS:
-                    env.step(trajectory_tau[k])
+                    env.step({"torque": trajectory_tau[k]})
             # 实际状态重新用同一组力矩推进并记录
-            observation = env.reset(angles[0], velocities[0])
+            observation = env.reset({"angle": angles[0], "velocity": velocities[0]})
             actual_q = np.zeros((POINTS, 4))
             actual_qdot = np.zeros((POINTS, 4))
             valid = True
             for k in range(POINTS):
-                actual_q[k] = observation.angle
-                actual_qdot[k] = observation.velocity
+                actual_q[k] = observation["angle"]
+                actual_qdot[k] = observation["velocity"]
                 if not (ROLL_LIMIT[0] <= actual_q[k, 1] <= ROLL_LIMIT[1]):
                     valid = False
                     break
@@ -118,15 +120,15 @@ def collect(segments: int, seed: int, output: Path) -> None:
                     valid = False
                     break
                 if k + 1 < POINTS:
-                    observation = env.step(trajectory_tau[k])
+                    observation = env.step({"torque": trajectory_tau[k]})
             if valid:
                 q[index] = actual_q
                 qdot[index] = actual_qdot
                 tau[index] = trajectory_tau
                 terrain[index] = [slope_angle, slope_direction]
                 base_yaw[index] = yaw
-                initial_angle[index] = initial_value.angle
-                initial_velocity[index] = initial_value.velocity
+                initial_angle[index] = initial_value["angle"]
+                initial_velocity[index] = initial_value["velocity"]
                 break
         else:
             raise RuntimeError(f"第 {index} 段始终超出关节限位，请降低参考幅值")
