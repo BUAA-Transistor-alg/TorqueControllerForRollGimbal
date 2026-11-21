@@ -20,13 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from evaluate import run_episode, step_response
 from sac import RecurrentSAC
-from tracking_env import (BIG_YAW_LIMIT, OBSERVATION_DIM, PITCH_LIMIT, ROLL_LIMIT,
-                          SMALL_YAW_LIMIT)
+from tracking_env import LIMITS, OBSERVATION_DIM
 
 
 def measure(agent, episodes: int, steps: int, parameter_scale: float, noise_scale: float,
             bias_scale: float, seed: int = 11000):
-    limits = (BIG_YAW_LIMIT, ROLL_LIMIT, SMALL_YAW_LIMIT, PITCH_LIMIT)
+    limits = LIMITS
     errors, outside, hits, peaks, recoveries = [], [], [], [], []
     contexts = []
     for index in range(episodes):
@@ -34,8 +33,10 @@ def measure(agent, episodes: int, steps: int, parameter_scale: float, noise_scal
                              noise_scale=noise_scale, bias_scale=bias_scale)
         reference = result["reference"]
         mask = np.zeros(reference.shape[0], dtype=bool)
-        for joint, (low, high) in enumerate(limits):
-            mask |= (reference[:, joint] < low) | (reference[:, joint] > high)
+        for joint, limits in enumerate(LIMITS):
+            if limits is None:
+                continue
+            mask |= (reference[:, joint] < limits[0]) | (reference[:, joint] > limits[1])
         errors.append(result["error"])
         outside.append(mask)
         hits.append(result["hits"])
@@ -67,8 +68,8 @@ def main() -> None:
     parser.add_argument("--policy", type=Path, default=Path("data/rl_noisy_stage2.pt"))
     parser.add_argument("--episodes", type=int, default=4)
     parser.add_argument("--episode-steps", type=int, default=1200)
-    parser.add_argument("--hidden-dim", type=int, default=64)
-    parser.add_argument("--layer-dim", type=int, default=128)
+    parser.add_argument("--hidden-dim", type=int, default=96)
+    parser.add_argument("--layer-dim", type=int, default=256)
     parser.add_argument("--report", type=Path, default=Path("data/rl_range.json"))
     parser.add_argument("--sweep", default="all")
     arguments = parser.parse_args()

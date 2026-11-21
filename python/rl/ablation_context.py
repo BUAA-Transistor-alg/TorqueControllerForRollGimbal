@@ -42,7 +42,7 @@ def main() -> None:
     parser.add_argument("--parameter-scale", type=float, default=0.8)
     arguments = parser.parse_args()
     torch.set_num_threads(4)
-    agent = RecurrentSAC(OBSERVATION_DIM, 4, 64, 128)
+    agent = RecurrentSAC(OBSERVATION_DIM, 4, 96, 256)
     agent.load(arguments.policy)
     full, stateless = [], []
     for index in range(arguments.episodes):

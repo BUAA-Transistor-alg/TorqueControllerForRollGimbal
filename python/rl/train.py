@@ -151,8 +151,8 @@ def main() -> None:
     parser.add_argument("--window", type=int, default=32)
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--parameter-scale", type=float, default=0.0)
-    parser.add_argument("--hidden-dim", type=int, default=64)
-    parser.add_argument("--layer-dim", type=int, default=128)
+    parser.add_argument("--hidden-dim", type=int, default=96)
+    parser.add_argument("--layer-dim", type=int, default=256)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--buffer-episodes", type=int, default=400)
@@ -161,6 +161,7 @@ def main() -> None:
     parser.add_argument("--context-entropy-target", type=float, default=0.0)
     parser.add_argument("--context-entropy-weight", type=float, default=0.0)
     parser.add_argument("--reset-context-lambda", action="store_true")
+    parser.add_argument("--difficulty-start", type=float, default=1.0)
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--save", type=Path, default=Path("data/rl_policy.pt"))
     parser.add_argument("--log", type=Path, default=Path("data/rl_training.json"))
@@ -198,6 +199,11 @@ def main() -> None:
     start = time.time()
     raw_rewards = []
     for iteration in range(arguments.iterations):
+        difficulty = min(1.0, arguments.difficulty_start
+                         + (1.0 - arguments.difficulty_start)
+                         * iteration / max(1.0, 0.6 * arguments.iterations))
+        for env in envs:
+            env.difficulty = difficulty
         observation_batch = np.stack([env.reset() for env in envs]) if iteration > 0 else observation_batch
         observation_batch, errors, episode_return, raw_rewards = rollout(
             agent, envs, buffer, observation_batch, arguments.episode_steps,

@@ -15,8 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "identification"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sac import RecurrentSAC
-from tracking_env import (BIG_YAW_LIMIT, OBSERVATION_DIM, PITCH_LIMIT, ROLL_LIMIT,
-                          SMALL_YAW_LIMIT, TrackingEnv)
+from tracking_env import LIMITS, OBSERVATION_DIM, TrackingEnv
 
 
 def run_episode(agent: RecurrentSAC, seed: int, episode_steps: int, parameter_scale: float,
@@ -80,8 +79,8 @@ def main() -> None:
     parser.add_argument("--parameter-scale", type=float, default=0.0)
     parser.add_argument("--noise-scale", type=float, default=1.0)
     parser.add_argument("--bias-scale", type=float, default=1.0)
-    parser.add_argument("--hidden-dim", type=int, default=64)
-    parser.add_argument("--layer-dim", type=int, default=128)
+    parser.add_argument("--hidden-dim", type=int, default=96)
+    parser.add_argument("--layer-dim", type=int, default=256)
     parser.add_argument("--report", type=Path, default=Path("data/rl_evaluation.json"))
     arguments = parser.parse_args()
     torch.set_num_threads(4)
@@ -95,10 +94,11 @@ def main() -> None:
     references = np.stack([item["reference"] for item in results])
     length = arguments.episode_steps
     windows = np.array_split(np.arange(length), 10)
-    limits = (BIG_YAW_LIMIT, ROLL_LIMIT, SMALL_YAW_LIMIT, PITCH_LIMIT)
     outside = np.zeros(errors.shape[:2], dtype=bool)
-    for joint, (low, high) in enumerate(limits):
-        outside |= ((references[:, :, joint] < low) | (references[:, :, joint] > high))
+    for joint, limits in enumerate(LIMITS):
+        if limits is None:
+            continue
+        outside |= ((references[:, :, joint] < limits[0]) | (references[:, :, joint] > limits[1]))
     summary = {
         "episodes": arguments.episodes, "parameter_scale": arguments.parameter_scale,
         "noise_scale": arguments.noise_scale, "bias_scale": arguments.bias_scale,
@@ -109,8 +109,10 @@ def main() -> None:
         "error_out_of_range": float(np.abs(errors[outside]).mean()) if outside.any() else None,
         "out_of_range_fraction": float(outside.mean()),
         "hits_per_episode": float(np.mean([item["hits"] for item in results])),
-        "peak_limit_usage": float(np.abs(np.stack([item["angle"] for item in results])
-                                          / np.array([np.pi, 0.785, 0.873, 0.785])).max()),
+        "peak_limit_usage": float(np.max([
+            np.abs(np.stack([item["angle"] for item in results])[:, :, joint]
+                   / (LIMITS[joint][1] - LIMITS[joint][0])).max()
+            for joint in range(4) if LIMITS[joint] is not None])),
     }
     contexts = np.stack([item["contexts"] for item in results])
     changes = np.linalg.norm(contexts[:, 1:] - contexts[:, :-1], axis=-1)
