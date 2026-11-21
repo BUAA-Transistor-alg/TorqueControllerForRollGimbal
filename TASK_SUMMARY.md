@@ -4,7 +4,7 @@
 
 唯一目标：从限位内、带测量噪声的闭环 PID 数据中辨识出一组物理参数，使得用辨识参数与真实参数在同一初始状态、同一记录力矩序列下做开环仿真时，0.25 s 到 0.5 s 内轨迹基本重合，并且任何轴上一开始的运动方向都不允许反向。参数取值本身可以与真实参数不同。
 
-最终交付 `python/data/identified_final.npz`（键 `model`：56 维原始参数）。实测结果（100 段标准数据，全部指标由 `python/eval_openloop.py` 计算）：
+最终交付 `data/identified_final.npz`（键 `model`：56 维原始参数）。实测结果（100 段标准数据，全部指标由 `python/identification/eval_openloop.py` 计算）：
 
     0.05 s  RMSE 2.0e-06 3.2e-05 5.6e-05 1.1e-05 rad
     0.10 s  RMSE 5.5e-06 6.6e-05 1.1e-04 3.4e-05 rad
@@ -38,7 +38,7 @@
 
 此前使用的 33 维基参数把惯性部分限制在一条 21 维子流形上，该子流形无法表示真实系统的动力学：把真值投影到这条子流形上，最小二乘意义下的不可约力矩残差高达 RMS 7.9e-2 N·m，是力矩噪声（0.01 N·m）的 8 倍。任何参数取值在该参数类内都不可能消除这个系统误差，因此长时段开环必然发散，roll 轴还会出现初始方向反向。
 
-`python/param_basis.py` 用数值方法构造可辨识基（不依赖任何结构秩推导假设），对真值的重建残差是机器零（6e-16 N·m）。
+`python/identification/param_basis.py` 用数值方法构造可辨识基（不依赖任何结构秩推导假设），对真值的重建残差是机器零（6e-16 N·m）。
 
 ### 1.2 `tcrg_inertial_basis` 的链缓存缺陷
 
@@ -53,14 +53,14 @@
 - 额外采集（用于降低参数方差）：`data/more_data_noisy.npz` 1200 段（与原协议完全一致，仅换随机种子）、`data/rich2_data_noisy.npz` 1000 段（多正弦 + 静态保持 + 快速阶跃，频率上限提高，PID 增益在标称附近随机，力矩饱和比例 0）。
 - 辨识只使用含噪的 `q`、`tau` 与已知的 `terrain`、`base_yaw`、`dt`；`q_clean`、`tau_clean` 与 `params.py` 的真实参数只用于评估。
 
-### 2.2 估计流程（`python/regressor_full.py`）
+### 2.2 估计流程（`python/identification/regressor_full.py`）
 
 1. 对含噪位置构造线性平滑算子（Savitzky-Golay 核，宽度 41 到 51、阶数 5），得到位置、速度、加速度；用同一算子对力矩做与零阶保持输入匹配的二次积分得到力矩的无偏目标，避免离散化偏差。
 2. 在每个采样点用 `tcrg_inertial_basis` 得到 44 列回归量 `Y`，按位置噪声与加速度噪声传播出的方差逐样本加权。
 3. 解析误差在变量修正：对平滑算子的噪声协方差与 `Y` 对各阶导数的灵敏度做解析传播，从 `A^T A` 中减去噪声贡献，得到无衰减偏置的正规矩阵，再解 28 维可辨识坐标。
 4. 物理约束投影：在 44 维惯性参数上做带约束的最小二乘，保证质量为正、质心惯量正定（仿真所需的最小条件；更严格的伪惯量半正定条件会把解压到可行域边界，实测会引入与数据量无关的偏差）。
 5. 多数据集合并：把不同数据集得到的独立估计在 28 维可辨识坐标上等权平均，再投影回物理合法模型。可辨识坐标误差从单次估计的 1.98e-03 降到 1.66e-03（真值可辨识坐标范数 2.8e-01）。
-6. 物理合理性整理（`python/finalize_model.py`）：在保持 28 维可辨识坐标完全不变的前提下，用 16 维零空间自由度把总质量固定到已知的 6 kg，并把每个刚体的质心惯量特征值下限抬到 1e-4 kg·m²。这一步不改变任何动力学预测，只让参数取值落在物理上合理的代表点上。
+6. 物理合理性整理（`python/identification/finalize_model.py`）：在保持 28 维可辨识坐标完全不变的前提下，用 16 维零空间自由度把总质量固定到已知的 6 kg，并把每个刚体的质心惯量特征值下限抬到 1e-4 kg·m²。这一步不改变任何动力学预测，只让参数取值落在物理上合理的代表点上。
 
 ### 2.3 为什么不用二阶段轨迹拟合
 
@@ -68,56 +68,56 @@
 
 ## 3. 复现
 
-    cd /home/huhu233/rm2027/TorqueControllerForRollGimbal
+全部命令在仓库根目录执行，数据与图表都位于根目录的 `data/`。
+
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
     cmake --build build -j
 
-    cd python
     # 标准数据（已存在）
-    python3 collect_closed_loop.py --segments 100
-    python3 add_noise.py
+    python3 python/acquisition/collect_closed_loop.py --segments 100
+    python3 python/acquisition/add_noise.py
     # 额外数据
-    python3 collect_closed_loop.py --segments 1200 --seed 777 --output data/more_data.npz
-    python3 add_noise.py --input data/more_data.npz --output data/more_data_noisy.npz --seed 778
-    python3 collect_rich_data.py --segments 1000
+    python3 python/acquisition/collect_closed_loop.py --segments 1200 --seed 777 --output data/more_data.npz
+    python3 python/acquisition/add_noise.py --input data/more_data.npz --output data/more_data_noisy.npz --seed 778
+    python3 python/acquisition/collect_rich_data.py --segments 1000
     # 标准数据拟合与补充数据拟合
-    OPENBLAS_NUM_THREADS=2 python3 regressor_full.py --data data/closed_loop_data_noisy.npz --save data/identified_regressor.npz --mode corrected --width 51 --order 5 --stride 3
-    OPENBLAS_NUM_THREADS=2 python3 regressor_full.py --data data/rich2_data_noisy.npz --segments 800 --save data/regressor_rich2.npz --mode corrected --width 41 --order 5 --stride 3
+    OPENBLAS_NUM_THREADS=2 python3 python/identification/regressor_full.py --data data/closed_loop_data_noisy.npz --save data/identified_regressor.npz --mode corrected --width 51 --order 5 --stride 3
+    OPENBLAS_NUM_THREADS=2 python3 python/identification/regressor_full.py --data data/rich2_data_noisy.npz --segments 800 --save data/regressor_rich2.npz --mode corrected --width 41 --order 5 --stride 3
     # 合并与导出
-    python3 combine_models.py --models data/regressor_rich2.npz data/identified_regressor.npz --save data/identified_combined.npz
-    python3 export_final.py --identified data/identified_combined.npz
+    python3 python/identification/combine_models.py --models data/regressor_rich2.npz data/identified_regressor.npz --save data/identified_combined.npz
+    python3 python/identification/export_final.py --identified data/identified_combined.npz
     # 评估
-    python3 eval_openloop.py --identified data/identified_final.npz
-    python3 check_direction.py --identified data/identified_final.npz
-    python3 plot_closed_loop.py --data data/closed_loop_data.npz --identified data/identified_final.npz
+    python3 python/identification/eval_openloop.py --identified data/identified_final.npz
+    python3 python/identification/check_direction.py --identified data/identified_final.npz
+    python3 python/identification/plot_closed_loop.py --data data/closed_loop_data.npz --identified data/identified_final.npz
 
 ## 4. 文件
 
 核心：
 
 - `python/gimbal_env.py`：仿真环境。接口由抽象基类 `Environment` 声明，接入真实环境时实现同一套接口即可。`reset` 接收配置字典（初值角度、速度、地形、底盘、底盘序列、力矩限幅），返回实际采用的观测字典：仿真可能无法完全满足请求（关节角超出限位会被夹取），真实环境同样回报实测值，因此保存数据一律使用返回值。`step` 接收控制字典（`torque`），返回一步后的完整观测，包含每一步都可能变化的关节角、关节角速度、实际施加力矩、坡度、坡向、底盘状态与时间。另提供 `feedforward_torque`（控制器前馈）与 `inverse_dynamics`。全部采集脚本通过该环境驱动仿真，只负责目标序列、控制器与记录。
-- `python/param_basis.py`：可辨识基、惯性参数与原始参数互转、物理可行性投影。
-- `python/regressor_fit.py`、`python/regressor_full.py`：平滑算子、噪声传播、解析误差在变量修正与物理约束回归。
-- `python/combine_models.py`：多次独立估计的合并与物理投影。
-- `python/export_final.py`：导出模型、可读参数清单与指标 JSON。
-- `python/data/identified_final.npz`：最终模型（`model` 56 维、`identifiable` 28 维可辨识坐标、`basis` 44×28）。
-- `python/data/identified_final.txt`：可读参数清单。
-- `python/data/identified_final_metrics.json`：全部评估指标。
+- `python/identification/param_basis.py`：可辨识基、惯性参数与原始参数互转、物理可行性投影。
+- `python/identification/regressor_fit.py`、`python/identification/regressor_full.py`：平滑算子、噪声传播、解析误差在变量修正与物理约束回归。
+- `python/identification/combine_models.py`：多次独立估计的合并与物理投影。
+- `python/identification/export_final.py`：导出模型、可读参数清单与指标 JSON。
+- `data/identified_final.npz`：最终模型（`model` 56 维、`identifiable` 28 维可辨识坐标、`basis` 44×28）。
+- `data/identified_final.txt`：可读参数清单。
+- `data/identified_final_metrics.json`：全部评估指标。
 
 采集脚本：
 
-- `python/collect_data.py`：按参考轨迹的逆动力学力矩推进，采集控制-响应序列。
-- `python/collect_closed_loop.py`：标准协议的闭环 PID 采集。
-- `python/collect_rich_data.py`：强激励闭环采集（更大参考幅值与增益范围）。
-- `python/collect_low_excitation.py`：低激励协议采集（慢分量与快分量分离）。
-- `python/collect_base_motion.py`：带底盘晃动与滑移的采集。
+- `python/acquisition/collect_data.py`：按参考轨迹的逆动力学力矩推进，采集控制-响应序列。
+- `python/acquisition/collect_closed_loop.py`：标准协议的闭环 PID 采集。
+- `python/acquisition/collect_rich_data.py`：强激励闭环采集（更大参考幅值与增益范围）。
+- `python/acquisition/collect_low_excitation.py`：低激励协议采集（慢分量与快分量分离）。
+- `python/acquisition/collect_base_motion.py`：带底盘晃动与滑移的采集。
 
 评估与验证：
 
-- `python/eval_openloop.py`：开环误差、方向一致率、静止状态方向一致率。
-- `python/check_direction.py`：1383 个状态网格上的初始加速度与 15 步净位移方向检查。
-- `python/leaderboard.py`：候选模型排序。
-- `python/plot_closed_loop.py`、`python/plot_final.py`：闭环与开环对比图。
+- `python/identification/eval_openloop.py`：开环误差、方向一致率、静止状态方向一致率。
+- `python/identification/check_direction.py`：1383 个状态网格上的初始加速度与 15 步净位移方向检查。
+- `python/identification/leaderboard.py`：候选模型排序。
+- `python/identification/plot_closed_loop.py`、`python/identification/plot_final.py`：闭环与开环对比图。
 
 ## 5. 已知限制
 
@@ -153,13 +153,13 @@
 
 文件：
 
-- `python/collect_low_excitation.py`：协议生成器（慢分量、快分量、坡度、静态保持比例均可调）。
-- `python/finalize_low_excitation.py`：生成数据、拟合并输出指标与对比图。
-- `python/study_low_excitation2.py`：协议扫描驱动。
-- `python/validate_low_seeds.py`、`python/check_low_seeds.py`：多种子稳健性验证。
-- `python/data/low_excitation_data.npz`、`python/data/low_excitation_data_noisy.npz`：推荐协议的 100 段数据。
-- `python/data/low_excitation_model.npz`：对应辨识模型。
-- `python/data/low_excitation_metrics.json`、`python/data/low_excitation_comparison.png`：指标与峰值对比图。
+- `python/acquisition/collect_low_excitation.py`：协议生成器（慢分量、快分量、坡度、静态保持比例均可调）。
+- `python/identification/finalize_low_excitation.py`：生成数据、拟合并输出指标与对比图。
+- `python/identification/study_low_excitation2.py`：协议扫描驱动。
+- `python/identification/validate_low_seeds.py`、`python/identification/check_low_seeds.py`：多种子稳健性验证。
+- `data/low_excitation_data.npz`、`data/low_excitation_data_noisy.npz`：推荐协议的 100 段数据。
+- `data/low_excitation_model.npz`：对应辨识模型。
+- `data/low_excitation_metrics.json`、`data/low_excitation_comparison.png`：指标与峰值对比图。
 
 ## 7. 噪声敏感性（各字段不同噪声尺度）
 
@@ -198,18 +198,18 @@
 
 文件：
 
-- `python/study_noise.py`：逐通道/逐字段噪声扫描驱动。
-- `python/study_geo_noise.py`：几何噪声细扫。
-- `python/study_noise_wide.py`：高噪声下加宽平滑窗口的补充实验。
-- `python/report_noise_study.py`：汇总表格与曲线。
-- `python/data/noise_study_[0-9].json`、`python/data/noise_geo_*.json`、`python/data/noise_wide_[0-9].json`：全部原始结果。
-- `python/data/noise_study.png`：噪声倍数与开环误差曲线。
+- `python/identification/study_noise.py`：逐通道/逐字段噪声扫描驱动。
+- `python/identification/study_geo_noise.py`：几何噪声细扫。
+- `python/identification/study_noise_wide.py`：高噪声下加宽平滑窗口的补充实验。
+- `python/identification/report_noise_study.py`：汇总表格与曲线。
+- `data/noise_study_[0-9].json`、`data/noise_geo_*.json`、`data/noise_wide_[0-9].json`：全部原始结果。
+- `data/noise_study.png`：噪声倍数与开环误差曲线。
 
 ## 8. 几何量偏差稳健辨识
 
 问题：记录数据的坡度、坡向、底盘偏航可能带大偏差。它们直接决定重力在底盘系中的方向，属于系统偏差，加宽平滑窗口无法抵消。基线在坡度误差 5 度时 0.5 s 开环 RMSE 恶化到 4.5e-02，10 度到 8.0e-02，15 度到 1.3e-01。
 
-方法（`python/geo_robust_fit.py` + `python/estimate_geometry_linear.py`）：
+方法（`python/identification/geo_robust_fit.py` + `python/identification/estimate_geometry_linear.py`）：
 
 1. 关键性质：底盘静止时重力力矩对底盘系重力方向 ĝ 严格线性，tau_grav = G(q) @ ĝ。G 的三列用三个参考地形实现（使 ĝ 分别等于底盘系三个单位向量）求差得到；零重力模型的力矩给出非重力部分。于是每个采样点满足 tau_obs - tau_ng = G @ ĝ，三个未知量加 |ĝ| = 1 的约束。所有采样点聚合后是一个三维约束最小二乘，不存在非线性优化的局部极小问题。
 2. 逐段解出 ĝ 后换算成 (坡度, 坡向)，底盘偏航取 0（两者对动力学的作用完全等价）。
@@ -234,16 +234,16 @@
 
 文件：
 
-- `python/estimate_geometry_linear.py`：线性几何估计（底盘系重力方向）。
-- `python/geo_robust_fit.py`：几何量与物理参数交替估计。
-- `python/report_geometry_robust.py`：汇总表格与曲线。
-- `python/data/geo_robust_reports_*.json`：各次实验的逐迭代记录。
-- `python/data/geo_robust_std_s10.npz`：10 度几何偏差下辨识出的模型。
-- `python/data/geometry_robust.png`：基线与几何估计的对比曲线。
+- `python/identification/estimate_geometry_linear.py`：线性几何估计（底盘系重力方向）。
+- `python/identification/geo_robust_fit.py`：几何量与物理参数交替估计。
+- `python/identification/report_geometry_robust.py`：汇总表格与曲线。
+- `data/geo_robust_reports_*.json`：各次实验的逐迭代记录。
+- `data/geo_robust_std_s10.npz`：10 度几何偏差下辨识出的模型。
+- `data/geometry_robust.png`：基线与几何估计的对比曲线。
 
 ## 9. 底盘晃动与滑移的容忍性
 
-做法：`python/collect_base_motion.py` 在采集时让底盘真实运动——
+做法：`python/acquisition/collect_base_motion.py` 在采集时让底盘真实运动——
 偏航角按正弦摆动（给出角速度与角加速度），底盘参考点带水平正弦线加速度（滑移）。
 控制器前馈使用真实底盘状态，因此记录力矩里含底盘运动引起的真实力矩。
 辨识仍用静态底盘假设的管线，验收仍用底盘静止、几何准确的 100 段评估集。
@@ -278,7 +278,7 @@
 
 文件：
 
-- `python/collect_base_motion.py`：带底盘晃动/滑移的采集脚本（参数化摆幅、频率、滑移加速度）。
-- `python/study_base_motion.py`：容忍性扫描驱动。
-- `python/data/bm_*_noisy.npz`：各配置的 100 段数据。
-- `python/data/base_motion_study_[0-9].json`：全部结果。
+- `python/acquisition/collect_base_motion.py`：带底盘晃动/滑移的采集脚本（参数化摆幅、频率、滑移加速度）。
+- `python/identification/study_base_motion.py`：容忍性扫描驱动。
+- `data/bm_*_noisy.npz`：各配置的 100 段数据。
+- `data/base_motion_study_[0-9].json`：全部结果。

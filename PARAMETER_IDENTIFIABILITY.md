@@ -1,6 +1,6 @@
 # 参数自由度与可辨识基说明
 
-本文件记录 4 自由度串联动力学模型的参数定义、可辨识维数、经验基的构造方法与物理可行条件。内容与代码实现一致：参数编号由 `include/gimbal_dynamics/parameters.hpp` 维护，动力学计算位于 `src/gimbal_dynamics`，可辨识基与物理投影由 `python/param_basis.py` 实现。
+本文件记录 4 自由度串联动力学模型的参数定义、可辨识维数、经验基的构造方法与物理可行条件。内容与代码实现一致：参数编号由 `include/gimbal_dynamics/parameters.hpp` 维护，动力学计算位于 `src/gimbal_dynamics`，可辨识基与物理投影由 `python/identification/param_basis.py` 实现。
 
 ## 1. 原始参数（56 个）
 
@@ -62,7 +62,7 @@
 
 ## 4. 经验可辨识基
 
-`python/param_basis.py` 的实现：
+`python/identification/param_basis.py` 的实现：
 
 1. 用标称几何（`NOMINAL_OFFSETS`）与一张随机状态表构造 44 列灵敏度矩阵 `S`（行数 4 × 状态数）。
 2. 对惯性部分做奇异值分解，取右奇异向量张成 24 维行空间；阻尼 4 个方向独立拼接。
