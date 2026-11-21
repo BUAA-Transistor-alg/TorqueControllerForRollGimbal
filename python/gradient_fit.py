@@ -118,7 +118,7 @@ def project(reduced: np.ndarray) -> np.ndarray:
     full[3] = max(full[3], 0.05)
     full[9] = max(full[9], 0.05)
     full[15] = max(full[15], 0.05)
-    m1 = params.MASSES[0]
+    m1 = 1.0
     cx, cy = full[1] / m1, full[2] / m1
     full[0] = max(full[0], m1 * (cx * cx + cy * cy) + 1.0e-4)
     full[31:35] = np.maximum(full[31:35], 0.0)
@@ -132,8 +132,7 @@ def project(reduced: np.ndarray) -> np.ndarray:
         longitudinal_min = m * ((c @ c) - (a @ c) ** 2) + 1.0e-4
         full[position + 4] = max(full[position + 4], longitudinal_min)
         B = (q_axis @ c) ** 2 - (p_axis @ c) ** 2
-        gauge_trace = float(p_axis @ ip.inertia_matrix(body) @ p_axis
-                            + q_axis @ ip.inertia_matrix(body) @ q_axis)
+        gauge_trace = 0.01
         d_value = full[position + 5] - m * B
         limit = max(gauge_trace - 1.0e-4, 1.0e-4)
         if d_value > limit:

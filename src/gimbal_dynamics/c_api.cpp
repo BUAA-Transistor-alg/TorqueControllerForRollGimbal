@@ -362,8 +362,9 @@ int tcrg_inertial_basis(const TcrgContext* context, const TcrgModel* model,
             qdot[i] = state_value.velocity[i];
             qdd_value[i] = qdd[i];
         }
-        const Chain<double> chain = evaluate_chain(template_model, scalar_terrain, base_state, q);
         const auto torque_of = [&](const ScalarModelParameters<double>& candidate) {
+            // 链的质心位置依赖候选模型的质心，每个候选都必须重新求值
+            const Chain<double> chain = evaluate_chain(candidate, scalar_terrain, base_state, q);
             MassInternals<double> internals;
             const Matrix4<double> mass = evaluate_mass_matrix(candidate, chain, &internals);
             const Vector4<double> bias = evaluate_bias(
