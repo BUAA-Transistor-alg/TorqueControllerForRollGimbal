@@ -38,6 +38,7 @@ REFERENCE_CENTERS = [0.0, -0.20, 0.0, 0.0]
 REFERENCE_AMPLITUDES = [0.60, 0.30, 0.35, 0.35]
 STEP_AMPLITUDE = 0.35
 DRIFT_RATE = 0.4
+OUT_OF_RANGE_MARGIN = 0.35
 
 BASE_YAW_AMPLITUDE = 6.0 * math.pi / 180.0
 BASE_YAW_FREQUENCY = (0.5, 3.0)
@@ -178,6 +179,10 @@ def generate_reference(rng: np.random.Generator, steps: int, difficulty: float =
             start = int(rng.integers(0, steps // 3))
             drift = rng.uniform(0.1, DRIFT_RATE) * rng.choice([-1.0, 1.0]) * difficulty
             signal[start:] += drift * (time[start:] - time[start])
+        limits = LIMITS[joint]
+        if limits is not None:
+            signal = np.clip(signal, limits[0] - OUT_OF_RANGE_MARGIN,
+                             limits[1] + OUT_OF_RANGE_MARGIN)
         angle[:, joint] = signal
     velocity = np.clip(np.gradient(angle, DT, axis=0), -3.0, 3.0)
     acceleration = np.gradient(velocity, DT, axis=0)

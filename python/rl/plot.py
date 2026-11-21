@@ -58,18 +58,17 @@ def plot_episode(output: Path, archive: Path):
     angle = data["angle"]
     reference = data["reference"]
     error = data["error"]
-    count = min(4, len(angle))
-    figure, axes = plt.subplots(count, 2, figsize=(12.0, 2.6 * count))
     names = ["大 yaw", "roll", "小 yaw", "pitch"]
-    for index in range(count):
-        axes[index, 0].plot(reference[index], color="C1", linestyle="--", label="参考")
-        axes[index, 0].plot(angle[index], color="C0", label="策略")
-        axes[index, 0].set_ylabel(names[index] + " (rad)")
-        axes[index, 0].grid(True, alpha=0.3)
-        axes[index, 0].legend(fontsize=7)
-        axes[index, 1].plot(np.abs(error[index]), color="C3")
-        axes[index, 1].set_ylabel("误差 (rad)")
-        axes[index, 1].grid(True, alpha=0.3)
+    figure, axes = plt.subplots(4, 2, figsize=(12.0, 2.6 * 4))
+    for joint in range(4):
+        axes[joint, 0].plot(reference[0][:, joint], color="C1", linestyle="--", label="参考")
+        axes[joint, 0].plot(angle[0][:, joint], color="C0", label="策略")
+        axes[joint, 0].set_ylabel(names[joint] + " (rad)")
+        axes[joint, 0].grid(True, alpha=0.3)
+        axes[joint, 0].legend(fontsize=7)
+        axes[joint, 1].plot(np.abs(error[0][:, joint]), color="C3")
+        axes[joint, 1].set_ylabel("误差 (rad)")
+        axes[joint, 1].grid(True, alpha=0.3)
     axes[-1, 0].set_xlabel("时间步")
     axes[-1, 1].set_xlabel("时间步")
     figure.suptitle("跟踪曲线与误差（随机参数回合）")
