@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "identification"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sac import RecurrentSAC, SequenceBuffer
-from tracking_env import OBSERVATION_DIM, TrackingEnv
+from tracking_env import OBSERVATION_DIM, TrackingEnv, identifiable_coordinates, sample_parameters
 
 
 class RewardNormalizer:
@@ -98,8 +98,10 @@ def rollout(agent: RecurrentSAC, envs, buffer: SequenceBuffer, observation_batch
     records["hidden_critic_one"].append(final_one.numpy())
     records["hidden_critic_two"].append(final_two.numpy())
     if collect:
+        coordinates = np.stack([env.info()["coordinates"] for env in envs])
         for index in range(count):
             episode = {
+                "coordinates": coordinates[index],
                 "observation": np.stack([item[index] for item in records["observation"]]),
                 "action": np.stack([item[index] for item in records["action"]]),
                 "reward": np.array([item[index] for item in records["reward"]]),
@@ -158,7 +160,10 @@ def main() -> None:
     parser.add_argument("--buffer-episodes", type=int, default=400)
     parser.add_argument("--stability-weight", type=float, default=0.0)
     parser.add_argument("--stability-warmup", type=int, default=300)
-    parser.add_argument("--context-entropy-target", type=float, default=0.0)
+    parser.add_argument("--context-entropy-target", type=float, default=-0.05)
+    parser.add_argument("--extractor-weight", type=float, default=0.0)
+    parser.add_argument("--extractor-converged-length", type=int, default=128)
+    parser.add_argument("--extractor-layer-dim", type=int, default=64)
     parser.add_argument("--context-entropy-weight", type=float, default=0.0)
     parser.add_argument("--reset-context-lambda", action="store_true")
     parser.add_argument("--difficulty-start", type=float, default=1.0)
@@ -181,12 +186,25 @@ def main() -> None:
     observation_batch = np.stack([env.reset() for env in envs])
     buffer = SequenceBuffer(arguments.buffer_episodes, OBSERVATION_DIM, 4,
                             arguments.hidden_dim)
+    # 坐标权重：按采样分布的标准差归一化，使各维贡献可比
+    sampled = []
+    for _ in range(12):
+        for env in envs:
+            env.reset()
+            sampled.append(env.info()["coordinates"])
+    coordinate_std = np.stack(sampled).std(axis=0) + 1.0e-8
+    coordinate_weights = 1.0 / coordinate_std ** 2
+    coordinate_weights = coordinate_weights / coordinate_weights.mean()
+    print("坐标标准差范围 %.4f 到 %.4f" % (coordinate_std.min(), coordinate_std.max()))
     agent = RecurrentSAC(OBSERVATION_DIM, 4, arguments.hidden_dim, arguments.layer_dim,
                          gamma=arguments.gamma, learning_rate=arguments.learning_rate,
                          stability_weight=arguments.stability_weight,
                          stability_warmup=arguments.stability_warmup,
                          context_entropy_target=arguments.context_entropy_target,
-                         context_entropy_weight=arguments.context_entropy_weight)
+                         context_entropy_weight=arguments.context_entropy_weight,
+                         extractor_weight=arguments.extractor_weight,
+                         extractor_layer_dim=arguments.extractor_layer_dim,
+                         coordinate_weights=coordinate_weights)
     if arguments.resume is not None:
         agent.load(arguments.resume)
         if arguments.reset_context_lambda:

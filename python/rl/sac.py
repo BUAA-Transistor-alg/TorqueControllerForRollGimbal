@@ -19,11 +19,24 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from networks import RecurrentActor, RecurrentCritic
+
+
+class ParameterExtractor(nn.Module):
+    """把收敛上下文映射到可辨识参数坐标，梯度回传到策略编码器。"""
+
+    def __init__(self, input_dim: int, output_dim: int, layer_dim: int = 128):
+        super().__init__()
+        self.body = nn.Sequential(nn.LayerNorm(input_dim), nn.Linear(input_dim, layer_dim),
+                                  nn.ReLU(), nn.Linear(layer_dim, output_dim))
+
+    def forward(self, inputs):
+        return self.body(inputs)
 
 
 class SequenceBuffer:
@@ -77,18 +90,21 @@ class SequenceBuffer:
         }
 
     def sample_converged(self, batch: int, length: int):
-        """从每个回合末尾取固定长度的窗口，用于统计收敛上下文的分布。"""
+        """从每个回合末尾取固定长度的窗口，返回观测、初始上下文与参数可辨识坐标。"""
         indices = np.random.randint(0, len(self.episodes), batch)
         windows = []
         hidden = []
+        targets = []
         for index in indices:
             episode = self.episodes[index]
             total = len(episode["action"])
             start = max(0, total - length)
             windows.append(episode["observation"][start:start + length])
             hidden.append(episode["hidden_actor"][start])
+            targets.append(episode["coordinates"])
         return (torch.as_tensor(np.stack(windows), dtype=torch.float32, device=self.device),
-                torch.as_tensor(np.stack(hidden), dtype=torch.float32, device=self.device))
+                torch.as_tensor(np.stack(hidden), dtype=torch.float32, device=self.device),
+                torch.as_tensor(np.stack(targets), dtype=torch.float32, device=self.device))
 
 
 class RecurrentSAC:
@@ -99,7 +115,11 @@ class RecurrentSAC:
                  stability_weight: float = 0.0, stability_warmup: int = 0,
                  context_entropy_target: float = 0.0,
                  context_entropy_learning_rate: float = 1e-3,
-                 context_entropy_weight: float = 0.0):
+                 context_entropy_weight: float = 0.0,
+                 extractor_weight: float = 0.0,
+                 extractor_layer_dim: int = 128,
+                 extractor_learning_rate: float = 3e-4,
+                 coordinate_weights=None):
         self.observation_dim = observation_dim
         self.action_dim = action_dim
         self.gamma = gamma
@@ -128,6 +148,13 @@ class RecurrentSAC:
         self.log_context_lambda = torch.tensor(0.0, requires_grad=True)
         self.context_optimizer = torch.optim.Adam([self.log_context_lambda],
                                                   lr=context_entropy_learning_rate)
+        self.extractor_weight = float(extractor_weight)
+        self.extractor = ParameterExtractor(hidden_dim, 28, extractor_layer_dim)
+        self.extractor_optimizer = torch.optim.Adam(self.extractor.parameters(),
+                                                    lr=extractor_learning_rate,
+                                                    weight_decay=1.0e-2)
+        self.coordinate_weights = (torch.ones(28) if coordinate_weights is None
+                                   else torch.as_tensor(coordinate_weights, dtype=torch.float32))
 
     @property
     def alpha(self):
@@ -231,19 +258,32 @@ class RecurrentSAC:
             loss_actor = loss_actor + self.stability_weight * stability
 
         context_entropy = torch.tensor(0.0)
-        if self.context_entropy_weight > 0.0:
-            converged_observation, converged_hidden = buffer.sample_converged(
+        extractor_loss = torch.tensor(0.0)
+        if self.context_entropy_weight > 0.0 or self.extractor_weight > 0.0:
+            converged_observation, converged_hidden, targets = buffer.sample_converged(
                 converged_batch, converged_length)
             converged = self.actor.encoder(converged_observation, converged_hidden)
-            directions = F.normalize(converged, dim=-1).mean(dim=1)
-            variance = directions.var(dim=0) + 1.0e-4
-            context_entropy = 0.5 * torch.log(variance).sum()
-            loss_actor = loss_actor - self.context_lambda * context_entropy
+            context_mean = self.actor.normalization(converged).mean(dim=1)
+            if self.context_entropy_weight > 0.0:
+                # 归一化熵：各维方差相对均匀分布的比值，均匀分布时为 0，常值为负无穷
+                variance = context_mean.var(dim=0) + 1.0e-4
+                context_entropy = 0.5 * torch.log(
+                    variance * self.actor.encoder.hidden_dim).mean()
+                loss_actor = loss_actor - self.context_lambda * context_entropy
+            if self.extractor_weight > 0.0:
+                prediction = self.extractor(context_mean)
+                extractor_loss = (((prediction - targets) ** 2)
+                                  * self.coordinate_weights).mean()
+                loss_actor = loss_actor + self.extractor_weight * extractor_loss
 
         self.actor_optimizer.zero_grad()
+        self.extractor_optimizer.zero_grad()
         loss_actor.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
         self.actor_optimizer.step()
+        if self.extractor_weight > 0.0:
+            torch.nn.utils.clip_grad_norm_(self.extractor.parameters(), 10.0)
+            self.extractor_optimizer.step()
 
         # 温度系数：熵高于目标则降低 alpha
         alpha_loss = -(self.log_alpha * (log_probability.detach()
@@ -261,13 +301,14 @@ class RecurrentSAC:
             context_loss.backward()
             self.context_optimizer.step()
             with torch.no_grad():
-                self.log_context_lambda.clamp_(-8.0, 2.0)
+                self.log_context_lambda.clamp_(-8.0, 4.0)
 
         self.soft_update()
         return {"actor_loss": float(loss_actor.detach()),
                 "alpha": float(self.alpha.detach()),
                 "stability": float(stability.detach()),
                 "context_entropy": float(context_entropy.detach()),
+                "extractor_loss": float(extractor_loss.detach()),
                 "context_lambda": float(self.context_lambda.detach()),
                 "log_probability": float(log_probability.mean().detach())}
 
@@ -288,7 +329,8 @@ class RecurrentSAC:
                     "target_critic_one": self.target_critic_one.state_dict(),
                     "target_critic_two": self.target_critic_two.state_dict(),
                     "log_alpha": self.log_alpha.detach(),
-                    "log_context_lambda": self.log_context_lambda.detach()}, path)
+                    "log_context_lambda": self.log_context_lambda.detach(),
+                    "extractor": self.extractor.state_dict()}, path)
 
     def load(self, path: Path):
         payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -298,6 +340,11 @@ class RecurrentSAC:
         self.target_actor.load_state_dict(payload["target_actor"])
         self.target_critic_one.load_state_dict(payload["target_critic_one"])
         self.target_critic_two.load_state_dict(payload["target_critic_two"])
+        if "extractor" in payload:
+            try:
+                self.extractor.load_state_dict(payload["extractor"])
+            except RuntimeError:
+                print("提取器结构变化，重新初始化")
         with torch.no_grad():
             self.log_alpha.copy_(payload["log_alpha"])
             self.log_context_lambda.copy_(payload["log_context_lambda"])

@@ -64,6 +64,7 @@ PREVIEW_NOISE = 0.015
 ACCELERATION_FILTER = 0.2
 LIMIT_WEIGHT = 30.0
 HIT_PENALTY = 20.0
+POSITION_FAR_WEIGHT = 1.5
 
 VELOCITY_SCALE = 2.0
 ERROR_SCALE = 0.2
@@ -80,9 +81,22 @@ def truth_parameters() -> np.ndarray:
                            np.array(params.JOINT_OFFSETS).reshape(-1), params.DAMPING])
 
 
+_BASIS = None
+
+
+def identifiable_basis():
+    global _BASIS
+    if _BASIS is None:
+        _BASIS = pb.compute_basis()[0]
+    return _BASIS
+
+
 def parameterize_truth() -> np.ndarray:
-    basis = pb.compute_basis()[0]
-    return basis.T @ pb.inertial_from_raw(truth_parameters())
+    return identifiable_basis().T @ pb.inertial_from_raw(truth_parameters())
+
+
+def identifiable_coordinates(raw: np.ndarray) -> np.ndarray:
+    return identifiable_basis().T @ pb.inertial_from_raw(raw)
 
 
 def max_gravity_torque(model, context) -> np.ndarray:
@@ -234,6 +248,7 @@ class TrackingEnv:
         self.base_accel_bias = np.zeros(3)
         self.preview_offset = np.zeros((PREVIEW_STEPS, 4))
         self.hits = 0
+        self.coordinates = None
 
     def _base_motion(self, index: int):
         time = index * DT
@@ -287,6 +302,7 @@ class TrackingEnv:
         self.step_index = 0
         self.previous_action = np.zeros(4)
         self.hits = 0
+        self.coordinates = None
         self.filtered_velocity = np.zeros(4)
         self.previous_filtered_velocity = np.zeros(4)
         return self.observation()
@@ -353,7 +369,9 @@ class TrackingEnv:
         error = wrap_angle(angle_ref - angle)
         position_ratio = (error / 0.02) ** 2
         velocity_ratio = ((velocity - velocity_ref) / 0.5) ** 2
-        position_cost = (position_ratio / (1.0 + position_ratio / 25.0)).mean()
+        # 小误差用饱和代价鼓励精确跟踪，大误差用不饱和的绝对值代价保证梯度不消失
+        position_cost = (position_ratio / (1.0 + position_ratio / 9.0)
+                         + POSITION_FAR_WEIGHT * np.abs(error)).mean()
         velocity_cost = (velocity_ratio / (1.0 + velocity_ratio / 25.0)).mean()
         effort_cost = (action ** 2 / 4.0).mean()
         smooth_cost = ((action - self.previous_action) ** 2 / 4.0).mean()
@@ -411,9 +429,12 @@ class TrackingEnv:
     def info(self) -> dict:
         angle = np.array([self.state.angle[i] for i in range(4)])
         reference = self.angle_ref[min(self.step_index, self.episode_steps - 1)]
+        if self.coordinates is None:
+            self.coordinates = identifiable_coordinates(self.raw).astype(np.float32)
         return {"raw": self.raw.copy(),
                 "error": wrap_angle(reference - angle).astype(np.float32),
-                "hits": self.hits, "motor_scale": self.motor_scale.copy()}
+                "hits": self.hits, "motor_scale": self.motor_scale.copy(),
+                "coordinates": self.coordinates}
 
     def close(self):
         self.context.close()
