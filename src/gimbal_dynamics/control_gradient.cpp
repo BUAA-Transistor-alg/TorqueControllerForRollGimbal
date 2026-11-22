@@ -33,7 +33,15 @@ void reversePass(const simulation::LossSpec& loss, const math::Vector4d* torque,
             accumulated += transpose(workspace.input_jacobian[substep]) * adjoint;
             adjoint = transpose(workspace.propagation[substep]) * adjoint;
         }
-        gradient[k] = accumulated + elementwise(loss.torque_weights, torque[k]) * torque_scale;
+        const math::Vector4d* previous = (k == 0) ? loss.previous_torque : &torque[k - 1];
+        math::Vector4d torque_gradient = elementwise(loss.torque_weights, torque[k]);
+        if (previous != nullptr) {
+            torque_gradient += elementwise(loss.torque_rate_weights, torque[k] - *previous);
+        }
+        if (k + 1 < num_steps) {
+            torque_gradient -= elementwise(loss.torque_rate_weights, torque[k + 1] - torque[k]);
+        }
+        gradient[k] = accumulated + torque_gradient * torque_scale;
     }
 }
 

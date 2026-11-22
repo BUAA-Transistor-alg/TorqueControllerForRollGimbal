@@ -109,7 +109,10 @@ inline Real simulate_forward(const ModelParameters& model, const Terrain& terrai
                                          (h / 6.0);
         }
         trace.step_end[k] = unpack_state(state);
-        total_loss += simulation::step_loss(loss, num_steps, k, trace.step_end[k], torque_k);
+        const math::Vector4d* previous_torque =
+            (k == 0) ? loss.previous_torque : &torque[k - 1];
+        total_loss += simulation::step_loss(loss, num_steps, k, trace.step_end[k], torque_k,
+                                            previous_torque);
     }
     return total_loss;
 }
@@ -194,7 +197,10 @@ Real simulate_trajectory_inputs(const ModelParameters& model, const Terrain& ter
                                          (h / 6.0);
         }
         trace.step_end[k] = unpack_state(state);
-        total_loss += simulation::step_loss(loss, num_steps, k, trace.step_end[k], torque_k);
+        const math::Vector4d* previous_torque =
+            (k == 0) ? loss.previous_torque : &torque[k - 1];
+        total_loss += simulation::step_loss(loss, num_steps, k, trace.step_end[k], torque_k,
+                                            previous_torque);
         step_visitor(k, trace.step_end[k]);
     }
     return total_loss;
@@ -267,7 +273,10 @@ Real simulate_trajectory(const ModelParameters& model, const Terrain& terrain,
                                          (h / 6.0);
         }
         trace.step_end[k] = unpack_state(state);
-        total_loss += simulation::step_loss(loss, num_steps, k, trace.step_end[k], torque_k);
+        const math::Vector4d* previous_torque =
+            (k == 0) ? loss.previous_torque : &torque[k - 1];
+        total_loss += simulation::step_loss(loss, num_steps, k, trace.step_end[k], torque_k,
+                                            previous_torque);
         step_visitor(k, trace.step_end[k]);
     }
     return total_loss;

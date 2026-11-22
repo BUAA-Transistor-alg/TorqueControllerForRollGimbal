@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 from typing import List, Sequence
 
+import numpy as np
+
 import params as default_params
 
 
@@ -56,6 +58,36 @@ class TcrgLossSpec(ctypes.Structure):
         ("torque_weights", ctypes.c_double * 4),
         ("target_angle", ctypes.POINTER(ctypes.c_double)),
         ("target_velocity", ctypes.POINTER(ctypes.c_double)),
+    ]
+
+
+class TcrgControlLoss(ctypes.Structure):
+    """控制量梯度使用的轨迹损失构成，字段顺序与 c_api.h 的 TcrgControlLoss 一致。
+
+    损失（K 为预测步数）：
+      L = 1/K Σ_k Σ_i [ wa_i (q_ki - q*_ki)^2 + wv_i (v_ki - v*_ki)^2
+                        + wt_i τ_ki^2 + wr_i (τ_ki - τ_{k-1,i})^2
+                        + wl_i hinge_i(q_ki)^2 ]
+          + 1/K Σ_i [ waT_i (q_Ki - q*_{K-1,i})^2 + wvT_i (v_Ki - v*_{K-1,i})^2 ]
+    hinge_i(q) = q - (upper_i - margin_i)（q 高于上软限时），
+                 (lower_i + margin_i) - q（q 低于下软限时），否则为 0。
+    τ_{-1,i} 取 previous_torque；previous_torque 为空指针时第 0 步跳过变化率项。
+    """
+
+    _fields_ = [
+        ("angle_weights", ctypes.c_double * 4),
+        ("velocity_weights", ctypes.c_double * 4),
+        ("torque_weights", ctypes.c_double * 4),
+        ("torque_rate_weights", ctypes.c_double * 4),
+        ("terminal_angle_weights", ctypes.c_double * 4),
+        ("terminal_velocity_weights", ctypes.c_double * 4),
+        ("limit_weights", ctypes.c_double * 4),
+        ("limit_lower", ctypes.c_double * 4),
+        ("limit_upper", ctypes.c_double * 4),
+        ("limit_margin", ctypes.c_double * 4),
+        ("target_angle", ctypes.POINTER(ctypes.c_double)),
+        ("target_velocity", ctypes.POINTER(ctypes.c_double)),
+        ("previous_torque", ctypes.POINTER(ctypes.c_double)),
     ]
 
 
@@ -157,6 +189,46 @@ _lib.tcrg_inertial_basis.argtypes = [
 _lib.tcrg_inertial_basis.restype = ctypes.c_int
 _lib.tcrg_last_error.argtypes = []
 _lib.tcrg_last_error.restype = ctypes.c_char_p
+
+_control_gradient_bound = False
+
+
+def _bind_control_gradient() -> None:
+    """首次使用时绑定控制量梯度接口。
+
+    库尚未导出 tcrg_control_gradient 时在此处直接抛出 AttributeError，
+    不使用静默降级路径。
+    """
+    global _control_gradient_bound
+    if _control_gradient_bound:
+        return
+    function = _lib.tcrg_control_gradient
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(TcrgModel),
+        ctypes.POINTER(TcrgTerrain),
+        ctypes.POINTER(TcrgBaseState),
+        ctypes.POINTER(TcrgState),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_size_t,
+        ctypes.c_double,
+        ctypes.c_int,
+        ctypes.POINTER(TcrgControlLoss),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(TcrgState),
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    function.restype = ctypes.c_int
+    _control_gradient_bound = True
+
+
+def _weights(values, name: str, default: float = 0.0) -> List[float]:
+    if values is None:
+        return [default] * 4
+    vector = [float(value) for value in values]
+    if len(vector) != 4:
+        raise ValueError(f"{name} 长度必须为 4")
+    return vector
 
 
 def _error() -> RuntimeError:
@@ -414,6 +486,118 @@ class Context:
         if result != 0:
             raise _error()
         return final_state
+
+    def control_gradient(
+        self,
+        model: TcrgModel,
+        terrain: TcrgTerrain,
+        base,
+        initial: TcrgState,
+        torques: Sequence[Sequence[float]],
+        target_angle: Sequence[Sequence[float]] | None = None,
+        target_velocity: Sequence[Sequence[float]] | None = None,
+        angle_weights: Sequence[float] | None = None,
+        velocity_weights: Sequence[float] | None = None,
+        torque_weights: Sequence[float] | None = None,
+        torque_rate_weights: Sequence[float] | None = None,
+        terminal_angle_weights: Sequence[float] | None = None,
+        terminal_velocity_weights: Sequence[float] | None = None,
+        limit_weights: Sequence[float] | None = None,
+        limit_lower: Sequence[float] | None = None,
+        limit_upper: Sequence[float] | None = None,
+        limit_margin: Sequence[float] | None = None,
+        previous_torque: Sequence[float] | None = None,
+        step: float = 0.01,
+        refinement: int = 2,
+    ):
+        """一次调用同时返回轨迹损失、损失对控制量的梯度与末端状态。
+
+        torques 形状为 (num_steps, 4)；target_angle/target_velocity 形状为 (num_steps, 4)，
+        为空表示该组跟踪项不参与；base 为单个 TcrgBaseState（广播到整个预测区间）
+        或长度为 num_steps 的序列；previous_torque 为上一拍实际施加的力矩。
+        返回 (loss, gradient[num_steps, 4], final_state)。
+        """
+        _bind_control_gradient()
+        count = len(torques)
+        if count == 0:
+            raise ValueError("torques 不能为空")
+        torque_array = (ctypes.c_double * (count * 4))(
+            *[float(value) for row in torques for value in row])
+        angle_array = None
+        velocity_array = None
+        if target_angle is not None:
+            angle_values = [float(value) for row in target_angle for value in row]
+            if len(angle_values) != count * 4:
+                raise ValueError("target_angle 的形状必须为 (num_steps, 4)")
+            angle_array = (ctypes.c_double * (count * 4))(*angle_values)
+        if target_velocity is not None:
+            velocity_values = [float(value) for row in target_velocity for value in row]
+            if len(velocity_values) != count * 4:
+                raise ValueError("target_velocity 的形状必须为 (num_steps, 4)")
+            velocity_array = (ctypes.c_double * (count * 4))(*velocity_values)
+        if isinstance(base, TcrgBaseState):
+            base_array = (TcrgBaseState * count)(*[base] * count)
+        else:
+            base_values = list(base)
+            if len(base_values) != count:
+                raise ValueError("base 序列长度必须等于 num_steps")
+            base_array = (TcrgBaseState * count)(*base_values)
+        loss_spec = TcrgControlLoss()
+        weight_fields = (
+            ("angle_weights", angle_weights),
+            ("velocity_weights", velocity_weights),
+            ("torque_weights", torque_weights),
+            ("torque_rate_weights", torque_rate_weights),
+            ("terminal_angle_weights", terminal_angle_weights),
+            ("terminal_velocity_weights", terminal_velocity_weights),
+            ("limit_weights", limit_weights),
+        )
+        for name, values in weight_fields:
+            field = getattr(loss_spec, name)
+            for joint, value in enumerate(_weights(values, name)):
+                field[joint] = value
+        for joint, value in enumerate(_weights(limit_lower, "limit_lower",
+                                               float("-inf"))):
+            loss_spec.limit_lower[joint] = value
+        for joint, value in enumerate(_weights(limit_upper, "limit_upper",
+                                               float("inf"))):
+            loss_spec.limit_upper[joint] = value
+        for joint, value in enumerate(_weights(limit_margin, "limit_margin")):
+            loss_spec.limit_margin[joint] = value
+        if angle_array is not None:
+            loss_spec.target_angle = ctypes.cast(angle_array,
+                                                 ctypes.POINTER(ctypes.c_double))
+        if velocity_array is not None:
+            loss_spec.target_velocity = ctypes.cast(velocity_array,
+                                                    ctypes.POINTER(ctypes.c_double))
+        previous_array = None
+        if previous_torque is not None:
+            previous_array = (ctypes.c_double * 4)(
+                *[float(value) for value in previous_torque])
+            loss_spec.previous_torque = ctypes.cast(previous_array,
+                                                    ctypes.POINTER(ctypes.c_double))
+        loss_value = ctypes.c_double()
+        final_state = TcrgState()
+        gradient_array = (ctypes.c_double * (count * 4))()
+        result = _lib.tcrg_control_gradient(
+            self._context,
+            ctypes.byref(model),
+            ctypes.byref(terrain),
+            base_array,
+            ctypes.byref(initial),
+            torque_array,
+            ctypes.c_size_t(count),
+            ctypes.c_double(float(step)),
+            ctypes.c_int(int(refinement)),
+            ctypes.byref(loss_spec),
+            ctypes.byref(loss_value),
+            ctypes.byref(final_state),
+            gradient_array,
+        )
+        if result != 0:
+            raise _error()
+        gradient = np.ctypeslib.as_array(gradient_array).copy().reshape(count, 4)
+        return loss_value.value, gradient, final_state
 
 
 def state_to_lists(state: TcrgState) -> tuple[List[float], List[float]]:

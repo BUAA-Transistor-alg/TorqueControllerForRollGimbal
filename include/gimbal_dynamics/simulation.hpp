@@ -21,22 +21,43 @@ struct StateT {
 
 // 标量轨迹损失（时间均值形式）：
 //   L = 1/K Σ_k [ Σ_i wa_i (q_i - q*_i)^2 + Σ_i wv_i (v_i - v*_i)^2
-//                  + Σ_i wt_i τ_{k,i}^2 ]
+//                  + Σ_i wt_i τ_{k,i}^2 + Σ_i wr_i (τ_{k,i} - τ_{k-1,i})^2
+//                  + Σ_i wl_i hinge_i(q_i)^2 ]
+//       + 1/K Σ_i [ waT_i (q_i - q*_i)^2 + wvT_i (v_i - v*_i)^2 ]（仅最后一步）
+//   hinge_i(q) = q - (upper_i - margin_i)   当 q > upper_i - margin_i
+//                (lower_i + margin_i) - q   当 q < lower_i + margin_i
+//                0                          其余情况
+//   k = 0 的力矩变化率参照 previous_torque；该指针为空时跳过该项。
 template <typename Real>
 struct LossSpecT {
     math::Vector<Real, 4> angle_weights = math::Vector<Real, 4>::zero();
     math::Vector<Real, 4> velocity_weights = math::Vector<Real, 4>::zero();
     math::Vector<Real, 4> torque_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> torque_rate_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> terminal_angle_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> terminal_velocity_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> limit_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> limit_lower = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> limit_upper = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> limit_margin = math::Vector<Real, 4>::zero();
     const math::Vector<Real, 4>* target_angle = nullptr;
     const math::Vector<Real, 4>* target_velocity = nullptr;
+    const math::Vector<Real, 4>* previous_torque = nullptr;
 };
 
-// 批量调用共享的损失权重：批次内所有样本使用同一组权重
+// 批量调用共享的损失权重与限位：批次内所有样本使用同一组权重与限位
 template <typename Real>
 struct LossWeightsT {
     math::Vector<Real, 4> angle_weights = math::Vector<Real, 4>::zero();
     math::Vector<Real, 4> velocity_weights = math::Vector<Real, 4>::zero();
     math::Vector<Real, 4> torque_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> torque_rate_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> terminal_angle_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> terminal_velocity_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> limit_weights = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> limit_lower = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> limit_upper = math::Vector<Real, 4>::zero();
+    math::Vector<Real, 4> limit_margin = math::Vector<Real, 4>::zero();
 };
 
 // 定步长设置：每个主步内做 refinement 次经典 RK4
@@ -86,8 +107,10 @@ math::Vector<Real, 8> state_derivative(const ModelParameters& model, const Terra
                                        const BaseState& base, const State& state,
                                        const math::Vector<Real, 4>& torque);
 
+// previous_torque 为 k-1 步的力矩；k = 0 时由调用方传入 loss.previous_torque
 Real step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step, const State& state,
-               const math::Vector<Real, 4>& torque);
+               const math::Vector<Real, 4>& torque,
+               const math::Vector<Real, 4>* previous_torque);
 
 math::Vector<Real, 8> step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
                                          std::size_t step, const State& state);

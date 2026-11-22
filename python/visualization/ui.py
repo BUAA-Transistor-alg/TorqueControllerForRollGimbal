@@ -3,14 +3,14 @@
 PyBullet 只用于显示与键盘交互，不参与动力学计算。动力学由仿真后端承担：后端实现
 `gimbal_env.Environment` 的 reset / step / close 接口，默认是 100 Hz（dt = 0.01 s）的
 GimbalEnv；换成真实世界控制时实现同一个接口并在创建 Viewer 时传入即可，控制器与界面不需要
-改动。控制器只读取观测字典并输出四维力矩，三种模式共用同一个 100 Hz 循环。
+改动。控制器只读取观测字典并输出四维力矩，四种模式共用同一个 100 Hz 循环。
 
 键盘：
-  1 / 2   关节 1  +1 / -1 N·m（力矩模式）或目标位置 +/−（PID 与策略模式）
+  1 / 2   关节 1  +1 / -1 N·m（力矩模式）或目标位置 +/−（目标位置模式）
   3 / 4   关节 2  同上
   5 / 6   关节 3  同上
   7 / 8   关节 4  同上
-  m       在直接力矩、PID 目标位置、策略网络目标位置三种模式间切换
+  m       在直接力矩、PID 目标位置、策略网络目标位置、MPC 目标位置四种模式间切换
   r       回到零位
   q/ESC   退出
 
@@ -19,10 +19,16 @@ GimbalEnv；换成真实世界控制时实现同一个接口并在创建 Viewer 
 0.07 rad（与控制器内部的目标裁剪一致）。控制器维护最近 0.2 s 的目标位置缓冲，用其斜率外推未来
 0.2 s 的预瞄参考，按训练时的 142 维观测布局输出归一化动作，再乘以标称电机力矩系数得到力矩。
 
+MPC 模式用标称模型求解固定时域最优控制问题，代价包含跟踪、力矩幅值、力矩变化率、关节软限位
+与终端跟踪，梯度由 C 接口的反向伴随法给出；目标位置同样由按键以固定速度移动，未来参考由目标
+历史斜率外推。
+
 用法：
   python ui.py                        # GUI
   python ui.py --mode rl              # 启动即进入策略模式
+  python ui.py --mode mpc             # 启动即进入 MPC 模式
   python ui.py --direct --steps 100 --mode rl --torque 1   # 无界面自检
+  python ui.py --direct --steps 100 --mode mpc --torque 1  # MPC 无界面自检
 
 依赖：pybullet、torch（仅策略模式）、本仓库的 python 目录。
 """
@@ -44,7 +50,7 @@ import pybullet as p
 
 import params
 from backend import make_simulation_env
-from controllers import PidController, RlController, TorqueController
+from controllers import MpcController, PidController, RlController, TorqueController
 
 DEFAULT_POLICY = Path(__file__).resolve().parents[2] / "data" / "rl_final.pt"
 STEP = 0.01  # 仿真步长（100 Hz），与仿真后端一致
@@ -141,7 +147,7 @@ class Viewer:
     def __init__(self, direct: bool = False, mode: str = "torque",
                  target_rate: float | None = None,
                  policy_path: str | None = None, environment=None):
-        if mode not in ("torque", "pid", "rl"):
+        if mode not in ("torque", "pid", "rl", "mpc"):
             raise ValueError("未知模式 %s" % mode)
         self.direct = direct
         if direct:
@@ -191,8 +197,10 @@ class Viewer:
                 self.controllers["torque"] = TorqueController()
             elif self.mode == "pid":
                 self.controllers["pid"] = PidController(self.target_rate)
-            else:
+            elif self.mode == "rl":
                 self.controllers["rl"] = RlController(self.target_rate, self.policy_path)
+            else:
+                self.controllers["mpc"] = MpcController(self.target_rate)
         return self.controllers[self.mode]
 
     def reset(self) -> None:
@@ -215,7 +223,7 @@ class Viewer:
                 continue
             if key == ord("m") and (event & p.KEY_WAS_TRIGGERED):
                 self.pressed.clear()
-                modes = ("torque", "pid", "rl")
+                modes = ("torque", "pid", "rl", "mpc")
                 self.mode = modes[(modes.index(self.mode) + 1) % len(modes)]
                 self.controller().reset(self.observation)
                 continue
@@ -258,7 +266,8 @@ class Viewer:
                 replaceItemUniqueId=self.axis_ids[joint],
             )
         controller = self.controllers.get(self.mode)
-        label = {"torque": "direct torque", "pid": "PID target", "rl": "RL target"}[self.mode]
+        label = {"torque": "direct torque", "pid": "PID target", "rl": "RL target",
+                 "mpc": "MPC target"}[self.mode]
         text = "mode: " + label
         for joint in range(4):
             if getattr(controller, "target", None) is not None:
@@ -295,10 +304,10 @@ def main() -> int:
     parser.add_argument("--steps", type=int, default=0, help="无界面模式下推进的帧数")
     parser.add_argument("--torque", type=float, default=0.0,
                         help="无界面模式下按住的方向键（力矩模式给力矩，目标模式移动目标）")
-    parser.add_argument("--mode", choices=("torque", "pid", "rl"), default="torque",
-                        help="初始模式：直接力矩、PID 目标位置或策略网络目标位置")
+    parser.add_argument("--mode", choices=("torque", "pid", "rl", "mpc"), default="torque",
+                        help="初始模式：直接力矩、PID 目标位置、策略网络目标位置或 MPC 目标位置")
     parser.add_argument("--target-rate", type=float, default=None,
-                        help="PID 与策略模式下按住按键时目标位置速度，rad/s")
+                        help="目标位置模式下按住按键时目标位置速度，rad/s")
     parser.add_argument("--policy", default=None,
                         help="策略模式使用的检查点路径，默认 data/rl_final.pt")
     arguments = parser.parse_args()
@@ -322,8 +331,8 @@ def main() -> int:
                 print("target:", [round(float(value), 6) for value in target])
             return 0
         print("键盘：1/2 关节1，3/4 关节2，5/6 关节3，7/8 关节4；"
-              "力矩模式输出 ±1 N·m，PID 与策略模式移动目标位置；"
-              "m 循环切换 力矩/PID/策略 模式；r 复位；q/ESC 退出")
+              "力矩模式输出 ±1 N·m，目标位置模式移动目标位置；"
+              "m 循环切换 力矩/PID/策略/MPC 模式；r 复位；q/ESC 退出")
         next_frame = time.perf_counter()
         while True:
             viewer.step()

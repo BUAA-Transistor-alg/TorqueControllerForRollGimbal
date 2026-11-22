@@ -84,9 +84,10 @@ bool valid(const TcrgModel* model, const TcrgTerrain* terrain, const TcrgBaseSta
 
 struct TcrgContext {
     explicit TcrgContext(int threads)
-        : handler(threads), parameter_sensitivity(threads) {}
+        : handler(threads), parameter_sensitivity(threads), control_gradient(threads) {}
     tcrg::gimbal_dynamics::ForwardSimulation<double> handler;
     tcrg::gimbal_dynamics::ParameterSensitivity<double> parameter_sensitivity;
+    tcrg::gimbal_dynamics::ControlGradient<double> control_gradient;
 };
 
 extern "C" {
@@ -329,6 +330,97 @@ int tcrg_parameter_gradient(const TcrgContext* context, const TcrgModel* model,
         store_state(output.final_state, final_state);
         for (int i = 0; i < 56; ++i) {
             gradient[i] = output.gradient[i];
+        }
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return 2;
+    }
+}
+
+int tcrg_control_gradient(const TcrgContext* context, const TcrgModel* model,
+                          const TcrgTerrain* terrain, const TcrgBaseState* base,
+                          const TcrgState* initial, const double* torque,
+                          size_t num_steps, double step, int refinement,
+                          const TcrgControlLoss* loss_spec, double* loss,
+                          TcrgState* final_state, double* gradient) {
+    if (context == nullptr || model == nullptr || terrain == nullptr || base == nullptr ||
+        initial == nullptr || torque == nullptr || loss_spec == nullptr || loss == nullptr ||
+        final_state == nullptr || gradient == nullptr) {
+        set_error("参数为空指针");
+        return 1;
+    }
+    if (num_steps == 0) {
+        set_error("num_steps 必须大于 0");
+        return 1;
+    }
+    try {
+        using namespace tcrg::gimbal_dynamics;
+        ControlGradientInputT<double> input;
+        input.model = convert_model(*model);
+        input.terrain = convert_terrain(*terrain);
+        input.initial = convert_state(*initial);
+        std::vector<BaseStateT<double>> bases(num_steps);
+        for (size_t k = 0; k < num_steps; ++k) {
+            bases[k] = convert_base(base[k]);
+        }
+        std::vector<math::Vector<double, 4>> torques(num_steps);
+        std::vector<math::Vector<double, 4>> targets_angle(num_steps);
+        std::vector<math::Vector<double, 4>> targets_velocity(num_steps);
+        for (size_t k = 0; k < num_steps; ++k) {
+            for (int i = 0; i < 4; ++i) {
+                torques[k][i] = torque[k * 4 + static_cast<size_t>(i)];
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            input.loss.angle_weights[i] = loss_spec->angle_weights[i];
+            input.loss.velocity_weights[i] = loss_spec->velocity_weights[i];
+            input.loss.torque_weights[i] = loss_spec->torque_weights[i];
+            input.loss.torque_rate_weights[i] = loss_spec->torque_rate_weights[i];
+            input.loss.terminal_angle_weights[i] = loss_spec->terminal_angle_weights[i];
+            input.loss.terminal_velocity_weights[i] = loss_spec->terminal_velocity_weights[i];
+            input.loss.limit_weights[i] = loss_spec->limit_weights[i];
+            input.loss.limit_lower[i] = loss_spec->limit_lower[i];
+            input.loss.limit_upper[i] = loss_spec->limit_upper[i];
+            input.loss.limit_margin[i] = loss_spec->limit_margin[i];
+        }
+        if (loss_spec->target_angle != nullptr) {
+            for (size_t k = 0; k < num_steps; ++k) {
+                for (int i = 0; i < 4; ++i) {
+                    targets_angle[k][i] = loss_spec->target_angle[k * 4 + static_cast<size_t>(i)];
+                }
+            }
+            input.loss.target_angle = targets_angle.data();
+        }
+        if (loss_spec->target_velocity != nullptr) {
+            for (size_t k = 0; k < num_steps; ++k) {
+                for (int i = 0; i < 4; ++i) {
+                    targets_velocity[k][i] =
+                        loss_spec->target_velocity[k * 4 + static_cast<size_t>(i)];
+                }
+            }
+            input.loss.target_velocity = targets_velocity.data();
+        }
+        math::Vector<double, 4> previous_torque = math::Vector<double, 4>::zero();
+        if (loss_spec->previous_torque != nullptr) {
+            for (int i = 0; i < 4; ++i) {
+                previous_torque[i] = loss_spec->previous_torque[i];
+            }
+            input.loss.previous_torque = &previous_torque;
+        }
+        input.base = bases.data();
+        input.torque = torques.data();
+        input.num_steps = num_steps;
+        input.spec.step = step;
+        input.spec.refinement = refinement;
+        ControlGradientOutputT<double> output;
+        context->control_gradient.run(input, output);
+        *loss = output.loss;
+        store_state(output.final_state, final_state);
+        for (size_t k = 0; k < num_steps; ++k) {
+            for (int i = 0; i < 4; ++i) {
+                gradient[k * 4 + static_cast<size_t>(i)] = output.gradient[k][i];
+            }
         }
         return 0;
     } catch (const std::exception& error) {

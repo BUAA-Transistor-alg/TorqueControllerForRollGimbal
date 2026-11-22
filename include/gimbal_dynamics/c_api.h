@@ -48,6 +48,25 @@ typedef struct TcrgLossSpec {
     const double* target_velocity;
 } TcrgLossSpec;
 
+// 控制量梯度使用的 MPC 代价配置：跟踪、力矩幅值、力矩变化率、关节软限位与终端项。
+// target_angle / target_velocity 长度均为 num_steps*4；previous_torque 长度为 4。
+// 三个指针均可为空：空目标按 0 处理，空 previous_torque 表示跳过 k = 0 的变化率项。
+typedef struct TcrgControlLoss {
+    double angle_weights[4];
+    double velocity_weights[4];
+    double torque_weights[4];
+    double torque_rate_weights[4];
+    double terminal_angle_weights[4];
+    double terminal_velocity_weights[4];
+    double limit_weights[4];
+    double limit_lower[4];
+    double limit_upper[4];
+    double limit_margin[4];
+    const double* target_angle;
+    const double* target_velocity;
+    const double* previous_torque;
+} TcrgControlLoss;
+
 // 创建/销毁上下文；thread_count 为参与前向仿真的总线程数（含调用线程），1 表示串行。
 TcrgContext* tcrg_context_create(int thread_count);
 void tcrg_context_destroy(TcrgContext* context);
@@ -86,6 +105,16 @@ int tcrg_parameter_gradient(const TcrgContext* context, const TcrgModel* model,
                             size_t num_steps, double step, int refinement,
                             const TcrgLossSpec* loss_spec, double* loss,
                             TcrgState* final_state, double gradient[56]);
+
+// 控制量梯度：返回损失、损失对 num_steps*4 个关节力矩的解析梯度以及末端状态。
+// base 为长度 num_steps 的数组（预测区间内逐步的底盘状态）；torque 长度 num_steps*4，
+// gradient 长度 num_steps*4，gradient[k*4+i] = ∂L/∂τ_{k,i}。
+int tcrg_control_gradient(const TcrgContext* context, const TcrgModel* model,
+                          const TcrgTerrain* terrain, const TcrgBaseState* base,
+                          const TcrgState* initial, const double* torque,
+                          size_t num_steps, double step, int refinement,
+                          const TcrgControlLoss* loss_spec, double* loss,
+                          TcrgState* final_state, double* gradient);
 
 // 40 个惯性基参数（每个刚体 m、h、I_o 的 10 个分量）与 4 个阻尼参数的
 // 逆动力学基矩阵。basis 的行顺序为 4 个关节力矩，列顺序为 44 个参数。

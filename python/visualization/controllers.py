@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import abc
 import sys
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "rl"))
 
 import gimbal_dynamics as gd
 import params
+from mpc.controller import LIMITS as MPC_LIMITS
+from mpc.controller import LIMIT_MARGIN as MPC_LIMIT_MARGIN
+from mpc.controller import TORQUE_LIMIT as MPC_TORQUE_LIMIT
+from mpc.controller import MpcController as HorizonMpcController
 
 TARGET_LIMIT = params.PID_TARGET_LIMIT
 
@@ -154,3 +159,79 @@ class RlController(TargetController):
 
     def close(self) -> None:
         self.policy.close()
+
+
+class MpcController(TargetController):
+    """滚动时域 MPC：按住按键移动目标，用目标历史斜率外推未来预测区间的参考。
+
+    每拍求解一个固定时域最优控制问题，代价由角度与角速度跟踪、力矩幅值、力矩变化率、
+    关节软限位二次铰链与终端跟踪组成，梯度由 C 接口的反向伴随法给出。
+    目标位置的产生方式与 PID 模式相同；大 yaw 的目标限幅 ±π，其余三轴的目标限制在
+    硬限位内侧 0.07 rad，与代价里的软限位一致。
+    """
+
+    HISTORY_LENGTH = 21
+    HORIZON = 15
+    MAX_ITER = 8
+    REFERENCE_VELOCITY_LIMIT = 3.0
+
+    def __init__(self, target_rate: float, context=None, model=None,
+                 horizon: int = HORIZON, max_iter: int = MAX_ITER):
+        super().__init__(target_rate)
+        self.bounds = [
+            (float(MPC_LIMITS[joint][0]) + MPC_LIMIT_MARGIN,
+             float(MPC_LIMITS[joint][1]) - MPC_LIMIT_MARGIN)
+            if MPC_LIMITS[joint][0] is not None else (-TARGET_LIMIT, TARGET_LIMIT)
+            for joint in range(4)
+        ]
+        self.context = gd.Context(4) if context is None else context
+        self.owns_context = context is None
+        self.model = gd.make_model() if model is None else model
+        self.mpc = HorizonMpcController(self.context, self.model, horizon=horizon,
+                                        torque_limit=MPC_TORQUE_LIMIT,
+                                        max_iter=max_iter)
+        self.target_history = deque(
+            [np.zeros(4) for _ in range(self.HISTORY_LENGTH)],
+            maxlen=self.HISTORY_LENGTH)
+
+    def reset(self, observation: dict) -> None:
+        super().reset(observation)
+        target = np.array(self.target, dtype=float)
+        self.target_history = deque([target.copy() for _ in range(self.HISTORY_LENGTH)],
+                                    maxlen=self.HISTORY_LENGTH)
+        self.mpc.reset()
+
+    def references(self, dt: float):
+        """由目标历史的最小二乘斜率外推未来 HORIZON 步的目标位置与目标角速度。"""
+        history = np.stack(self.target_history)
+        times = np.arange(len(history)) * float(dt)
+        centered = times - times.mean()
+        denominator = max(float(np.sum(centered ** 2)), 1.0e-9)
+        slope = ((centered[:, None] * (history - history.mean(axis=0))).sum(axis=0)
+                 / denominator)
+        steps = np.arange(1, self.mpc.horizon + 1) * float(dt)
+        future = np.stack([self.clamp(list(target))
+                           for target in history[-1][None, :] + slope[None, :] * steps[:, None]])
+        velocity = np.clip(slope, -self.REFERENCE_VELOCITY_LIMIT,
+                           self.REFERENCE_VELOCITY_LIMIT)
+        return future, np.tile(velocity, (self.mpc.horizon, 1))
+
+    def command(self, observation: dict, inputs: list[tuple[int, float]],
+                dt: float) -> list[float]:
+        self.move_target(inputs, dt)
+        self.target_history.append(np.array(self.target, dtype=float))
+        angle = np.asarray(observation["angle"], dtype=float)
+        velocity = np.asarray(observation["velocity"], dtype=float)
+        target_angle, target_velocity = self.references(dt)
+        terrain, base = scenario_from(observation)
+        torque = self.mpc.command(angle, velocity, target_angle, target_velocity,
+                                  terrain, base)
+        return [float(value) for value in torque]
+
+    @property
+    def last_info(self):
+        return self.mpc.last_info
+
+    def close(self) -> None:
+        if self.owns_context:
+            self.context.close()
