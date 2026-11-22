@@ -115,6 +115,34 @@ def rollout(agent: RecurrentSAC, envs, buffer: SequenceBuffer, observation_batch
     return observation_batch, np.array(errors), float(returns.mean()), np.concatenate(raw_rewards)
 
 
+def collect_extractor_data(agent, envs, steps: int, window: int = 128):
+    """用当前策略在若干新回合上采集提取器训练样本（观测窗口、起始上下文、参数坐标）。"""
+    windows, hiddens, coordinates = [], [], []
+    for env in envs:
+        observation = env.reset()
+        hidden, _, _ = agent.initial_hidden(1)
+        observations = []
+        hidden_states = []
+        info = None
+        for _ in range(steps):
+            observations.append(observation)
+            hidden_states.append(hidden[0].numpy())
+            tensor = torch.as_tensor(observation[None], dtype=torch.float32)
+            with torch.no_grad():
+                action, _, hidden = agent.act_partial(tensor, hidden, True)
+            observation, reward, done, info = env.step(action.numpy()[0])
+        start = max(0, len(observations) - window)
+        windows.append(np.stack(observations[start:]))
+        hiddens.append(hidden_states[start])
+        coordinates.append(info["coordinates"])
+    window_tensor = torch.as_tensor(np.stack(windows), dtype=torch.float32)
+    hidden_tensor = torch.as_tensor(np.stack(hiddens), dtype=torch.float32)
+    with torch.no_grad():
+        context = agent.converged_context(window_tensor, hidden_tensor).numpy()
+    return {"window": window_tensor, "hidden": hidden_tensor, "context": context,
+            "coordinates": np.stack(coordinates).astype(np.float32)}
+
+
 def evaluate(agent: RecurrentSAC, seeds, episode_steps: int, parameter_scale: float,
              deterministic: bool = True):
     """多回合评估：返回整体跟踪误差、前段与后段误差、以及收敛上下文。"""
@@ -164,6 +192,11 @@ def main() -> None:
     parser.add_argument("--extractor-weight", type=float, default=0.0)
     parser.add_argument("--extractor-converged-length", type=int, default=128)
     parser.add_argument("--extractor-layer-dim", type=int, default=64)
+    parser.add_argument("--extractor-episodes", type=int, default=4)
+    parser.add_argument("--extractor-steps", type=int, default=4)
+    parser.add_argument("--extractor-batch", type=int, default=128)
+    parser.add_argument("--extractor-capacity", type=int, default=2048)
+    parser.add_argument("--extractor-learning-rate", type=float, default=3.0e-4)
     parser.add_argument("--context-entropy-weight", type=float, default=0.0)
     parser.add_argument("--reset-context-lambda", action="store_true")
     parser.add_argument("--difficulty-start", type=float, default=1.0)
@@ -192,9 +225,8 @@ def main() -> None:
         for env in envs:
             env.reset()
             sampled.append(env.info()["coordinates"])
+    coordinate_mean = np.stack(sampled).mean(axis=0)
     coordinate_std = np.stack(sampled).std(axis=0) + 1.0e-8
-    coordinate_weights = 1.0 / coordinate_std ** 2
-    coordinate_weights = coordinate_weights / coordinate_weights.mean()
     print("坐标标准差范围 %.4f 到 %.4f" % (coordinate_std.min(), coordinate_std.max()))
     agent = RecurrentSAC(OBSERVATION_DIM, 4, arguments.hidden_dim, arguments.layer_dim,
                          gamma=arguments.gamma, learning_rate=arguments.learning_rate,
@@ -202,9 +234,10 @@ def main() -> None:
                          stability_warmup=arguments.stability_warmup,
                          context_entropy_target=arguments.context_entropy_target,
                          context_entropy_weight=arguments.context_entropy_weight,
-                         extractor_weight=arguments.extractor_weight,
+                         extractor_weight=0.0,
                          extractor_layer_dim=arguments.extractor_layer_dim,
-                         coordinate_weights=coordinate_weights)
+                         probe_learning_rate=arguments.extractor_learning_rate,
+                         coordinate_mean=coordinate_mean, coordinate_std=coordinate_std)
     if arguments.resume is not None:
         agent.load(arguments.resume)
         if arguments.reset_context_lambda:
@@ -212,6 +245,12 @@ def main() -> None:
                 agent.log_context_lambda.fill_(0.0)
         print("从 %s 继续训练" % arguments.resume)
 
+    extractor_envs = [TrackingEnv(seed=900000 + arguments.seed * 100 + index,
+                                  episode_steps=arguments.episode_steps,
+                                  parameter_scale=max(arguments.parameter_scale, 0.2))
+                      for index in range(arguments.extractor_episodes)]
+    extractor_contexts = []
+    extractor_coordinates = []
     history = []
     normalizer = RewardNormalizer()
     start = time.time()
@@ -237,10 +276,32 @@ def main() -> None:
             actor_statistics["critic_loss"] = critic_one_loss
             actor_statistics["target_value"] = target_value
             statistics.append(actor_statistics)
+        probe_loss, auxiliary_loss = 0.0, 0.0
+        if arguments.extractor_weight > 0.0:
+            for env in extractor_envs:
+                env.difficulty = difficulty
+            fresh = collect_extractor_data(agent, extractor_envs,
+                                           arguments.episode_steps, 128)
+            extractor_contexts.append(fresh["context"])
+            extractor_coordinates.append(fresh["coordinates"])
+            while len(extractor_contexts) > arguments.extractor_capacity:
+                extractor_contexts.pop(0)
+                extractor_coordinates.pop(0)
+            all_context = torch.as_tensor(np.concatenate(extractor_contexts), dtype=torch.float32)
+            all_coordinates = torch.as_tensor(np.concatenate(extractor_coordinates),
+                                              dtype=torch.float32)
+            probe_loss = agent.update_extractor_probe(all_context, all_coordinates,
+                                                      steps=arguments.extractor_steps,
+                                                      batch=arguments.extractor_batch)
+            auxiliary_loss = agent.actor_auxiliary(
+                fresh["window"], fresh["hidden"],
+                torch.as_tensor(fresh["coordinates"], dtype=torch.float32),
+                arguments.extractor_weight)
         record = {"iteration": iteration, "episode_return": float(episode_return),
                   "mean_error": float(errors.mean()),
                   "mean_error_late": float(errors[len(errors) // 2:].mean()),
-                  "buffer": len(buffer)}
+                  "buffer": len(buffer), "probe_samples": sum(len(item) for item in extractor_contexts),
+                  "probe_loss": float(probe_loss), "auxiliary_loss": float(auxiliary_loss)}
         if statistics:
             for key in statistics[0]:
                 record[key] = float(np.mean([item[key] for item in statistics]))

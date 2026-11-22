@@ -34,8 +34,10 @@ def collect(agent, episodes: int, steps: int, scale: float, seed: int = 21000,
             observation, reward, done, info = env.step(action.numpy()[0])
         context = np.mean(normalized_history[-converged_length:], axis=0)
         with torch.no_grad():
-            prediction = agent.extractor(
+            normalized_prediction = agent.extractor(
                 torch.as_tensor(context, dtype=torch.float32)[None])[0].numpy()
+        prediction = (normalized_prediction * agent.coordinate_std.numpy()
+                      + agent.coordinate_mean.numpy())
         contexts.append(context)
         targets.append(info["coordinates"])
         predictions.append(prediction)
@@ -52,10 +54,12 @@ def main() -> None:
     parser.add_argument("--parameter-scale", type=float, default=1.0)
     parser.add_argument("--hidden-dim", type=int, default=96)
     parser.add_argument("--layer-dim", type=int, default=256)
+    parser.add_argument("--extractor-layer-dim", type=int, default=64)
     parser.add_argument("--report", type=Path, default=Path("data/rl_v5_extractor.json"))
     arguments = parser.parse_args()
     torch.set_num_threads(4)
-    agent = RecurrentSAC(OBSERVATION_DIM, 4, arguments.hidden_dim, arguments.layer_dim)
+    agent = RecurrentSAC(OBSERVATION_DIM, 4, arguments.hidden_dim, arguments.layer_dim,
+                         extractor_layer_dim=arguments.extractor_layer_dim)
     agent.load(arguments.policy)
     contexts, targets, raws, predictions = collect(
         agent, arguments.episodes, arguments.episode_steps, arguments.parameter_scale)

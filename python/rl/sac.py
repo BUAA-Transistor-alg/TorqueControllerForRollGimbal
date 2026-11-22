@@ -119,7 +119,8 @@ class RecurrentSAC:
                  extractor_weight: float = 0.0,
                  extractor_layer_dim: int = 128,
                  extractor_learning_rate: float = 3e-4,
-                 coordinate_weights=None):
+                 probe_learning_rate: float = 3.0e-4,
+                 coordinate_mean=None, coordinate_std=None):
         self.observation_dim = observation_dim
         self.action_dim = action_dim
         self.gamma = gamma
@@ -153,8 +154,12 @@ class RecurrentSAC:
         self.extractor_optimizer = torch.optim.Adam(self.extractor.parameters(),
                                                     lr=extractor_learning_rate,
                                                     weight_decay=1.0e-2)
-        self.coordinate_weights = (torch.ones(28) if coordinate_weights is None
-                                   else torch.as_tensor(coordinate_weights, dtype=torch.float32))
+        self.probe_optimizer = torch.optim.Adam(self.extractor.parameters(),
+                                                lr=probe_learning_rate, weight_decay=1.0e-2)
+        self.coordinate_mean = (torch.zeros(28) if coordinate_mean is None
+                                else torch.as_tensor(coordinate_mean, dtype=torch.float32))
+        self.coordinate_std = (torch.ones(28) if coordinate_std is None
+                               else torch.as_tensor(coordinate_std, dtype=torch.float32))
 
     @property
     def alpha(self):
@@ -187,6 +192,44 @@ class RecurrentSAC:
         else:
             action, _ = self.actor.sample(mean, log_std)
         return action, None, hidden_actor
+
+    def converged_context(self, windows, hidden):
+        """由一段观测窗口与其起始上下文算出收敛上下文的平均（可带梯度）。"""
+        converged = self.actor.encoder(windows, hidden)
+        return self.actor.normalization(converged).mean(dim=1)
+
+    def update_extractor_probe(self, contexts, coordinates, steps: int = 4,
+                               batch: int = 128):
+        """用滚动采集的（上下文，参数坐标）样本训练提取器；只更新提取器。"""
+        count = contexts.shape[0]
+        if count < 2:
+            return 0.0
+        loss_value = 0.0
+        for _ in range(steps):
+            index = torch.randint(0, count, (min(batch, count),))
+            prediction = self.extractor(contexts[index])
+            target = (coordinates[index] - self.coordinate_mean) / self.coordinate_std
+            loss = ((prediction - target) ** 2).mean()
+            self.probe_optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.extractor.parameters(), 5.0)
+            self.probe_optimizer.step()
+            loss_value = float(loss.detach())
+        return loss_value
+
+    def actor_auxiliary(self, windows, hidden, coordinates, weight: float):
+        """把提取器在新鲜样本上的误差回传到策略编码器，鼓励上下文携带参数信息。"""
+        if weight <= 0.0:
+            return 0.0
+        context = self.converged_context(windows, hidden)
+        prediction = self.extractor(context)
+        target = (coordinates - self.coordinate_mean) / self.coordinate_std
+        loss = ((prediction - target) ** 2).mean()
+        self.actor_optimizer.zero_grad()
+        (weight * loss).backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 5.0)
+        self.actor_optimizer.step()
+        return float(loss.detach())
 
     def update_critics(self, batch):
         observation = batch["observation"]
@@ -330,7 +373,9 @@ class RecurrentSAC:
                     "target_critic_two": self.target_critic_two.state_dict(),
                     "log_alpha": self.log_alpha.detach(),
                     "log_context_lambda": self.log_context_lambda.detach(),
-                    "extractor": self.extractor.state_dict()}, path)
+                    "extractor": self.extractor.state_dict(),
+                    "coordinate_mean": self.coordinate_mean,
+                    "coordinate_std": self.coordinate_std}, path)
 
     def load(self, path: Path):
         payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -345,6 +390,9 @@ class RecurrentSAC:
                 self.extractor.load_state_dict(payload["extractor"])
             except RuntimeError:
                 print("提取器结构变化，重新初始化")
+        if "coordinate_mean" in payload:
+            self.coordinate_mean = payload["coordinate_mean"]
+            self.coordinate_std = payload["coordinate_std"]
         with torch.no_grad():
             self.log_alpha.copy_(payload["log_alpha"])
             self.log_context_lambda.copy_(payload["log_context_lambda"])

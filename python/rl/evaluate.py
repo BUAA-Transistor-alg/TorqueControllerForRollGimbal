@@ -81,6 +81,7 @@ def main() -> None:
     parser.add_argument("--bias-scale", type=float, default=1.0)
     parser.add_argument("--hidden-dim", type=int, default=96)
     parser.add_argument("--layer-dim", type=int, default=256)
+    parser.add_argument("--extractor-layer-dim", type=int, default=64)
     parser.add_argument("--report", type=Path, default=Path("data/rl_evaluation.json"))
     arguments = parser.parse_args()
     torch.set_num_threads(4)

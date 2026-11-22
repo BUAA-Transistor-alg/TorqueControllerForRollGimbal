@@ -62,8 +62,9 @@ BASE_ACCEL_BIAS = 0.05
 PREVIEW_OFFSET = 0.03
 PREVIEW_NOISE = 0.015
 ACCELERATION_FILTER = 0.2
-LIMIT_WEIGHT = 30.0
-HIT_PENALTY = 20.0
+LIMIT_WEIGHT = 100.0
+HIT_PENALTY = 50.0
+OVERSHOOT_WEIGHT = 500.0
 POSITION_FAR_WEIGHT = 1.5
 
 VELOCITY_SCALE = 2.0
@@ -386,11 +387,12 @@ class TrackingEnv:
             self.state = gd.make_state(angle, clamped)
         self.step_index += 1
         self.base, _ = self._base_motion(self.step_index)
-        hit = self._enforce_limits()
+        hit, overshoot = self._enforce_limits()
         self.hits += int(hit)
+        # 超出限位的幅度按平方惩罚：增长速度快于跟踪代价随贴近期望目标下降的速度
         cost = (position_cost + 0.05 * velocity_cost + 0.02 * effort_cost
                 + 0.02 * smooth_cost + LIMIT_WEIGHT * limit_cost
-                + HIT_PENALTY * float(hit))
+                + HIT_PENALTY * float(hit) + OVERSHOOT_WEIGHT * overshoot ** 2)
         done = self.step_index >= self.episode_steps - 1
         return self.observation(), float(-cost), done, self.info()
 
@@ -405,26 +407,30 @@ class TrackingEnv:
             total += penetration ** 2
         return total / 3.0
 
-    def _enforce_limits(self) -> bool:
+    def _enforce_limits(self):
+        """关节限位按刚性挡块处理；返回是否撞到限位与超出限位的最大幅度。"""
         angle = np.array([self.state.angle[i] for i in range(4)])
         velocity = np.array([self.state.velocity[i] for i in range(4)])
         clamped = angle.copy()
         hit = False
+        overshoot = 0.0
         for joint in range(4):
             limits = LIMITS[joint]
             if limits is None:
                 continue
             if clamped[joint] < limits[0]:
+                overshoot = max(overshoot, limits[0] - clamped[joint])
                 clamped[joint] = limits[0]
                 velocity[joint] = 0.0
                 hit = True
             elif clamped[joint] > limits[1]:
+                overshoot = max(overshoot, clamped[joint] - limits[1])
                 clamped[joint] = limits[1]
                 velocity[joint] = 0.0
                 hit = True
         if hit:
             self.state = gd.make_state(clamped, velocity)
-        return hit
+        return hit, overshoot
 
     def info(self) -> dict:
         angle = np.array([self.state.angle[i] for i in range(4)])

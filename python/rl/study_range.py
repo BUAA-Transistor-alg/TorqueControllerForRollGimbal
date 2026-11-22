@@ -70,6 +70,7 @@ def main() -> None:
     parser.add_argument("--episode-steps", type=int, default=1200)
     parser.add_argument("--hidden-dim", type=int, default=96)
     parser.add_argument("--layer-dim", type=int, default=256)
+    parser.add_argument("--extractor-layer-dim", type=int, default=64)
     parser.add_argument("--report", type=Path, default=Path("data/rl_range.json"))
     parser.add_argument("--sweep", default="all")
     arguments = parser.parse_args()
