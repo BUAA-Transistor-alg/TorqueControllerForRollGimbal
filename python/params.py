@@ -33,13 +33,13 @@ JOINT_OFFSETS = [
     [0.0, 0.0, 0.1579],
 ]
 
-# 粘性阻尼，暂时统一取 0.1 N·m·s/rad
-DAMPING = [0.1, 0.1, 0.1, 0.1]
+# 粘性阻尼，暂时统一取 0.01 N·m·s/rad
+DAMPING = [0.01, 0.01, 0.01, 0.01]
 
 GRAVITY = 9.81
 
 # PID 目标模式参数：四个关节的位置目标由按键以恒定速度移动，PID 计算力矩
-PID_TARGET_RATE = 1.5          # 按下按键时目标位置的速度，rad/s
+PID_TARGET_RATE = 10.0          # 按下按键时目标位置的速度，rad/s
 PID_TARGET_LIMIT = 3.14159265  # 目标位置限幅，rad
 PID_KP = [8.0, 2.0, 2.0, 2.0]
 PID_KI = [0.2, 0.2, 0.2, 0.2]

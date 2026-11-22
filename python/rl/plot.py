@@ -20,34 +20,45 @@ def load_json(path: Path):
     return json.loads(Path(path).read_text()) if Path(path).exists() else []
 
 
-def plot_training(output: Path, logs):
-    figure, axes = plt.subplots(2, 2, figsize=(11.0, 6.4))
+def plot_training(output: Path, logs, scales):
+    figure, axes = plt.subplots(2, 2, figsize=(11.5, 6.8))
     for label, path in logs:
         history = load_json(path)
         if not history:
             continue
         iterations = [item["iteration"] for item in history]
-        axes[0, 0].plot(iterations, [item["mean_error"] for item in history], label=label)
-        axes[0, 1].plot(iterations, [item.get("alpha", np.nan) for item in history], label=label)
-        evaluated = [item for item in history if "evaluation_early_error" in item]
+        smoothed = [item.get("mean_error_smoothed", item["mean_error"]) for item in history]
+        axes[0, 0].plot(iterations, smoothed, label=label)
+        evaluated = [item for item in history if "evaluation_0.0" in item]
         if evaluated:
-            axes[1, 0].plot([item["iteration"] for item in evaluated],
-                            [item["evaluation_early_error"] for item in evaluated],
-                            marker="o", markersize=3, label=label + " 早段")
-            axes[1, 0].plot([item["iteration"] for item in evaluated],
-                            [item["evaluation_late_error"] for item in evaluated],
-                            marker="s", markersize=3, linestyle="--", label=label + " 末段")
-        axes[1, 1].plot(iterations, [item.get("stability", 0.0) for item in history], label=label)
-        axes[1, 1].plot(iterations, [item.get("context_entropy", np.nan) / 100.0
-                                     for item in history], ":", label=label + " 熵/100")
-    axes[0, 0].set_title("训练期平均误差")
-    axes[0, 1].set_title("温度系数")
-    axes[1, 0].set_title("评估误差（前四分之一与后四分之一）")
-    axes[1, 1].set_title("上下文稳定项与熵")
+            axes[0, 0].plot([item["iteration"] for item in evaluated],
+                            [item["evaluation_0.0"]["in_range_error"] for item in evaluated],
+                            "o-", markersize=3, label=label + " 固定参数评估")
+        axes[0, 1].plot(iterations, [item.get("alpha", np.nan) for item in history],
+                        label=label + " 温度")
+        axes[0, 1].plot(iterations, [item.get("scale_max", np.nan) for item in history],
+                        label=label + " 尺度上限")
+        axes[1, 0].plot(iterations, [item.get("behavior_loss", np.nan) for item in history],
+                        label=label + " 克隆")
+        axes[1, 0].plot(iterations, [item.get("dynamics_loss", np.nan) for item in history],
+                        label=label + " 动力学")
+        axes[1, 0].plot(iterations, [item.get("parameter_loss", np.nan) for item in history],
+                        label=label + " 参数")
+        axes[1, 0].plot(iterations, [item.get("load_loss", np.nan) for item in history],
+                        label=label + " 负载")
+        axes[1, 1].plot(iterations, [item.get("mean_hits", np.nan) for item in history],
+                        label=label + " 平均撞限位")
+        axes[1, 1].plot(iterations, [item.get("max_hits", np.nan) for item in history],
+                        ":", label=label + " 最大撞限位")
+    axes[0, 0].set_title("训练与固定参数评估的限位内误差")
+    axes[0, 1].set_title("温度系数与参数尺度上限")
+    axes[1, 0].set_title("辅助损失")
+    axes[1, 1].set_title("每回合撞限位次数")
     for axis in axes.ravel():
         axis.set_xlabel("迭代")
+        axis.set_yscale("log")
         axis.grid(True, alpha=0.3)
-        axis.legend(fontsize=7)
+        axis.legend(fontsize=6)
     figure.tight_layout()
     figure.savefig(output, dpi=160)
     print("已保存", output)
@@ -71,7 +82,7 @@ def plot_episode(output: Path, archive: Path):
         axes[joint, 1].grid(True, alpha=0.3)
     axes[-1, 0].set_xlabel("时间步")
     axes[-1, 1].set_xlabel("时间步")
-    figure.suptitle("跟踪曲线与误差（随机参数回合）")
+    figure.suptitle("跟踪曲线与误差")
     figure.tight_layout()
     figure.savefig(output, dpi=160)
     print("已保存", output)
@@ -84,7 +95,6 @@ def plot_adaptation(output: Path, archives, labels):
         error = np.abs(data["error"])
         mean = error.mean(axis=(0, 2)) if error.ndim == 3 else error.mean(axis=0)
         axes[0].plot(mean, label=label)
-        steps = np.arange(mean.size)
         window = max(1, mean.size // 30)
         smoothed = np.convolve(mean, np.ones(window) / window, mode="valid")
         axes[1].plot(smoothed, label=label)
@@ -100,30 +110,29 @@ def plot_adaptation(output: Path, archives, labels):
     print("已保存", output)
 
 
-def plot_context(output: Path, archive: Path):
-    data = np.load(archive)
-    context = data["context"]
-    parameters = data["parameters"]
-    total_mass = parameters[:, 0:4].sum(axis=1)
-    centered = context - context.mean(axis=0)
-    _, _, components = np.linalg.svd(centered, full_matrices=False)
-    projection = centered @ components[:2].T
-    figure, axes = plt.subplots(1, 2, figsize=(11.0, 4.2))
-    scatter = axes[0].scatter(projection[:, 0], projection[:, 1], c=total_mass, cmap="viridis")
-    figure.colorbar(scatter, ax=axes[0], label="总质量 (kg)")
-    axes[0].set_title("收敛上下文的前两个主成分")
-    axes[0].set_xlabel("主成分 1")
-    axes[0].set_ylabel("主成分 2")
-    correlation = []
-    for dimension in range(parameters.shape[1]):
-        value = parameters[:, dimension]
-        if value.std() < 1.0e-9:
-            correlation.append(0.0)
+def plot_scale_sweep(output: Path, reports):
+    figure, axes = plt.subplots(1, 2, figsize=(11.0, 4.0))
+    for label, path in reports:
+        data = load_json(path)
+        if "parameter_scale" not in data:
             continue
-        correlation.append(float(np.corrcoef(value, context[:, 0])[0, 1]))
-    axes[1].hist(np.abs(correlation), bins=20, color="C0")
-    axes[1].set_title("各参数与上下文第一维的相关系数绝对值")
-    axes[1].grid(True, alpha=0.3)
+        scales = sorted(float(key) for key in data["parameter_scale"])
+        errors = [data["parameter_scale"][str(scale)]["in_range_error"] for scale in scales]
+        hits = [data["parameter_scale"][str(scale)]["max_hits"] for scale in scales]
+        axes[0].plot(scales, errors, "o-", label=label)
+        axes[1].plot(scales, hits, "s-", label=label)
+        if "compare_parameter_scale" in data:
+            errors = [data["compare_parameter_scale"][str(scale)]["in_range_error"]
+                      for scale in scales]
+            hits = [data["compare_parameter_scale"][str(scale)]["max_hits"] for scale in scales]
+            axes[0].plot(scales, errors, "o--", label=label + " 对照基线")
+            axes[1].plot(scales, hits, "s--", label=label + " 对照基线")
+    axes[0].set_title("参数尺度扫描：限位内误差")
+    axes[1].set_title("参数尺度扫描：单回合最大撞限位")
+    for axis in axes:
+        axis.set_xlabel("参数尺度")
+        axis.grid(True, alpha=0.3)
+        axis.legend(fontsize=8)
     figure.tight_layout()
     figure.savefig(output, dpi=160)
     print("已保存", output)
@@ -134,23 +143,29 @@ def main() -> None:
     parser.add_argument("--mode", default="training")
     parser.add_argument("--output", type=Path, default=Path("data/rl_plot.png"))
     parser.add_argument("--logs", nargs="*", default=[])
+    parser.add_argument("--reports", nargs="*", default=[])
     parser.add_argument("--archive", type=Path, default=None)
     parser.add_argument("--archives", nargs="*", default=[])
     parser.add_argument("--labels", nargs="*", default=[])
+    parser.add_argument("--scales", nargs="*", type=float, default=[])
     arguments = parser.parse_args()
-    if arguments.mode == "training":
-        logs = []
-        for item in arguments.logs:
+
+    def pairs(items):
+        result = []
+        for item in items:
             label, path = item.split("=", 1)
-            logs.append((label, Path(path)))
-        plot_training(arguments.output, logs)
+            result.append((label, Path(path)))
+        return result
+
+    if arguments.mode == "training":
+        plot_training(arguments.output, pairs(arguments.logs), arguments.scales)
     elif arguments.mode == "episode":
         plot_episode(arguments.output, arguments.archive)
     elif arguments.mode == "adaptation":
         plot_adaptation(arguments.output, [Path(item) for item in arguments.archives],
                         arguments.labels)
-    elif arguments.mode == "context":
-        plot_context(arguments.output, arguments.archive)
+    elif arguments.mode == "sweep":
+        plot_scale_sweep(arguments.output, pairs(arguments.reports))
 
 
 if __name__ == "__main__":

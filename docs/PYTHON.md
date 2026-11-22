@@ -11,8 +11,11 @@ python/
   gimbal_env.py          仿真环境，提供 reset 与 step 接口
   acquisition/           数据采集：采集循环、协议生成、加噪与数据切片
   identification/        参数辨识：回归、评估、物理投影、协议与噪声实验
+  rl/                    强化学习自适应控制器：环境、网络、结构化标定、训练与评估
   visualization/         PyBullet 可视化与键盘交互
 ```
+
+`python/rl/` 的方法、结果与复现命令见 `docs/RL.md`。
 
 三个子目录中的脚本都能直接运行：`python3 python/<分组>/<脚本>.py`，脚本自己把
 `python/` 加入模块搜索路径。
@@ -96,8 +99,22 @@ python3 python/visualization/ui.py --direct --steps 100 # 无界面自检
 ```
 
 键盘：`1`/`2` 关节 1（大 yaw），`3`/`4` 关节 2（roll），`5`/`6` 关节 3（小 yaw），
-`7`/`8` 关节 4（pitch），`m` 在力矩模式与 PID 目标模式间切换，`r` 回零位，`q` 或 `ESC` 退出。
-PyBullet 只负责显示，动力学由本项目库计算。
+`7`/`8` 关节 4（pitch），`m` 在直接力矩、PID 目标位置、策略网络目标位置三种模式间循环切换，
+`r` 回零位，`q` 或 `ESC` 退出。PyBullet 只负责显示，动力学由本项目库计算。
+
+界面与仿真后端、控制器分开：`python/visualization/backend.py` 提供与 `gimbal_env.Environment`
+相同的 reset / step / close 接口（默认是 100 Hz 的 `GimbalEnv`），
+`python/visualization/controllers.py` 提供三种控制器，所有模式共用同一个 100 Hz 循环。换成真实世界
+控制时实现同一个后端接口并在创建 `Viewer` 时传入即可。
+
+策略模式使用 `data/rl_final.pt` 的循环残差 SAC 控制器（`python/rl/deploy.py`），目标位置的产生
+方式与 PID 模式相同，控制器维护 0.2 s 的目标位置缓冲并外推预瞄参考；策略模式下大 yaw 的目标位置
+不限幅，其余三轴与控制器一致（硬限位内侧 0.07 rad）：
+
+```bash
+python3 python/visualization/ui.py --mode rl
+python3 python/visualization/ui.py --direct --mode rl --steps 200 --torque 1   # 无界面自检
+```
 
 ## 直接调用前向仿真
 

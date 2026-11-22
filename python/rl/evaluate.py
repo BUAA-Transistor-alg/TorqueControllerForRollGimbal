@@ -1,4 +1,10 @@
-"""评估训练好的循环策略：跟踪精度、限位行为、阶跃响应、随时间与参数的变化。"""
+"""评估自适应控制器的跟踪性能、限位行为与漂移适应。
+
+用法（在仓库根目录）：
+    python3 python/rl/evaluate.py --policy data/rl_adaptive.pt --episodes 8 \
+        --scales 0.0,0.5,1.0,1.5,2.0,2.5 --report data/rl_eval_adaptive.json
+    python3 python/rl/evaluate.py --policy data/rl_adaptive.pt --compare data/rl_fixed.pt
+"""
 
 from __future__ import annotations
 
@@ -15,46 +21,70 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "identification"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sac import RecurrentSAC
-from tracking_env import LIMITS, OBSERVATION_DIM, TrackingEnv
+from tracking_env import FAST_INPUT_DIM, LIMITS, OBSERVATION_DIM, TrackingEnv
+
+
+def build_agent(policy: Path) -> RecurrentSAC:
+    payload = torch.load(policy, map_location="cpu", weights_only=False)
+    actor = payload["actor"]
+    fast_dim = actor["encoder.fast.projection.weight"].shape[0]
+    slow_dim = actor["encoder.slow.weight_ih"].shape[0] // 3
+    layer_dim = actor["body.0.weight"].shape[0]
+    agent = RecurrentSAC(OBSERVATION_DIM, 4, FAST_INPUT_DIM, fast_dim, slow_dim, 18,
+                         layer_dim)
+    agent.load(policy)
+    agent.actor.eval()
+    return agent
 
 
 def run_episode(agent: RecurrentSAC, seed: int, episode_steps: int, parameter_scale: float,
-                deterministic: bool = True, noise_scale: float = 1.0,
-                bias_scale: float = 1.0):
+                drift_scale: float = 0.0, drift_motor: float = 0.0, difficulty: float = 1.0,
+                noise_scale: float = 1.0, bias_scale: float = 1.0,
+                deterministic: bool = True, ablate: str = "none",
+                freeze_drift: bool = False):
     env = TrackingEnv(seed=seed, episode_steps=episode_steps,
-                      parameter_scale=parameter_scale, noise_scale=noise_scale,
-                      bias_scale=bias_scale)
+                      parameter_scale=parameter_scale, drift_scale=drift_scale,
+                      drift_motor=drift_motor, difficulty=difficulty,
+                      noise_scale=noise_scale, bias_scale=bias_scale,
+                      load_in_observation=getattr(agent, "load_in_observation", True),
+                      freeze_drift=freeze_drift)
     observation = env.reset()
     hidden_actor, _, _ = agent.initial_hidden(1)
-    errors, actions, angles, references, contexts = [], [], [], [], []
-    for step in range(episode_steps):
+    errors, angles, references, actions = [], [], [], []
+    for _ in range(episode_steps):
+        if ablate == "slow":
+            hidden_actor = hidden_actor.clone()
+            hidden_actor[..., agent.fast_dim:] = 0.0
+        elif ablate == "all":
+            hidden_actor = agent.actor.initial_state(1)
         tensor = torch.as_tensor(observation[None], dtype=torch.float32)
         with torch.no_grad():
             action, _, hidden_actor = agent.act_partial(tensor, hidden_actor, deterministic)
-        with torch.no_grad():
-            direction = torch.nn.functional.normalize(hidden_actor, dim=-1)[0].numpy()
-        contexts.append(direction.copy())
         observation, reward, done, info = env.step(action.numpy()[0])
         errors.append(info["error"].copy())
         actions.append(action.numpy()[0].copy())
-        index = min(env.step_index, env.episode_steps - 1)
         angles.append(np.array([env.state.angle[i] for i in range(4)]))
-        references.append(env.angle_ref[index].copy())
-    with torch.no_grad():
-        tensor = torch.as_tensor(observation[None], dtype=torch.float32)
-        final_hidden = agent.actor.encoder.step(tensor, hidden_actor)
-        context = agent.actor.normalization(final_hidden)[0].numpy()
+        references.append(env.angle_ref[min(env.step_index, episode_steps - 1)].copy())
     result = {"seed": seed, "error": np.array(errors), "action": np.array(actions),
               "angle": np.array(angles), "reference": np.array(references),
-              "context": context, "contexts": np.array(contexts),
-              "hidden": final_hidden[0].numpy(), "hits": env.hits,
-              "parameters": env.info()["raw"]}
+              "hits": env.hits, "raw": env.raw.copy()}
     env.close()
     return result
 
 
+def closest_approach(angle: np.ndarray) -> float:
+    """受限关节在整段回合里离最近硬限位的最小距离（度）。"""
+    closest = np.inf
+    for joint, limits in enumerate(LIMITS):
+        if limits is None:
+            continue
+        values = angle[:, :, joint]
+        distance = np.minimum(values - limits[0], limits[1] - values)
+        closest = min(closest, float(distance.min()))
+    return float(np.degrees(closest))
+
+
 def step_response(references, errors, threshold: float = 0.01, window: int = 200):
-    """检测参考轨迹的阶跃并统计峰值误差与恢复时间；输入形状为 (回合, 时间, 关节)。"""
     references = np.asarray(references)
     errors = np.asarray(errors)
     peaks, recoveries = [], []
@@ -71,84 +101,134 @@ def step_response(references, errors, threshold: float = 0.01, window: int = 200
     return peaks, recoveries
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="评估循环策略")
-    parser.add_argument("--policy", type=Path, default=Path("data/rl_stage2.pt"))
-    parser.add_argument("--episodes", type=int, default=8)
-    parser.add_argument("--episode-steps", type=int, default=1500)
-    parser.add_argument("--parameter-scale", type=float, default=0.0)
-    parser.add_argument("--noise-scale", type=float, default=1.0)
-    parser.add_argument("--bias-scale", type=float, default=1.0)
-    parser.add_argument("--hidden-dim", type=int, default=96)
-    parser.add_argument("--layer-dim", type=int, default=256)
-    parser.add_argument("--extractor-layer-dim", type=int, default=64)
-    parser.add_argument("--report", type=Path, default=Path("data/rl_evaluation.json"))
-    arguments = parser.parse_args()
-    torch.set_num_threads(4)
-    agent = RecurrentSAC(OBSERVATION_DIM, 4, arguments.hidden_dim, arguments.layer_dim)
-    agent.load(arguments.policy)
-    results = [run_episode(agent, 7000 + index, arguments.episode_steps,
-                           arguments.parameter_scale, noise_scale=arguments.noise_scale,
-                           bias_scale=arguments.bias_scale)
-               for index in range(arguments.episodes)]
+def summarize_episodes(results, episode_steps: int) -> dict:
     errors = np.stack([item["error"] for item in results])
     references = np.stack([item["reference"] for item in results])
-    length = arguments.episode_steps
-    windows = np.array_split(np.arange(length), 10)
-    outside = np.zeros(errors.shape[:2], dtype=bool)
+    angles = np.stack([item["angle"] for item in results])
+    outside = np.zeros(errors.shape, dtype=bool)
     for joint, limits in enumerate(LIMITS):
         if limits is None:
             continue
-        outside |= ((references[:, :, joint] < limits[0]) | (references[:, :, joint] > limits[1]))
-    summary = {
-        "episodes": arguments.episodes, "parameter_scale": arguments.parameter_scale,
-        "noise_scale": arguments.noise_scale, "bias_scale": arguments.bias_scale,
-        "mean_absolute_error": float(np.abs(errors).mean()),
-        "per_joint": np.abs(errors).mean(axis=(0, 1)).tolist(),
-        "window_errors": [float(np.abs(errors[:, window]).mean()) for window in windows],
-        "error_in_range": float(np.abs(errors[~outside]).mean()),
-        "error_out_of_range": float(np.abs(errors[outside]).mean()) if outside.any() else None,
-        "out_of_range_fraction": float(outside.mean()),
-        "hits_per_episode": float(np.mean([item["hits"] for item in results])),
-        "peak_limit_usage": float(np.max([
-            np.abs(np.stack([item["angle"] for item in results])[:, :, joint]
-                   / (LIMITS[joint][1] - LIMITS[joint][0])).max()
-            for joint in range(4) if LIMITS[joint] is not None])),
-    }
-    contexts = np.stack([item["contexts"] for item in results])
-    changes = np.linalg.norm(contexts[:, 1:] - contexts[:, :-1], axis=-1)
-    change_windows = np.array_split(np.arange(changes.shape[1]), 10)
-    summary["context_change_windows"] = [float(changes[:, window].mean())
-                                         for window in change_windows]
+        outside[:, :, joint] = ((references[:, :, joint] < limits[0])
+                                | (references[:, :, joint] > limits[1]))
+    hits = np.array([item["hits"] for item in results])
     peaks, recoveries = step_response(references, errors)
-    summary["step_peak_error"] = float(np.mean(peaks)) if peaks else None
-    summary["step_recovery_steps"] = float(np.mean(recoveries)) if recoveries else None
-    summary["step_count"] = len(peaks)
-    print("平均绝对误差 %.4f rad，各关节 %s" % (
-        summary["mean_absolute_error"], np.round(summary["per_joint"], 4)))
-    print("限位内误差 %.4f，限位外目标误差 %s，限位外比例 %.2f" % (
-        summary["error_in_range"],
-        None if summary["error_out_of_range"] is None
-        else round(summary["error_out_of_range"], 4), summary["out_of_range_fraction"]))
-    print("每回合撞限位 %.2f 次，最大限位占用 %.3f" % (
-        summary["hits_per_episode"], summary["peak_limit_usage"]))
-    if summary["step_count"]:
-        print("阶跃响应：%d 个阶跃，峰值误差 %.4f，恢复步数 %.0f" % (
-            summary["step_count"], summary["step_peak_error"],
-            summary["step_recovery_steps"]))
-    else:
-        print("阶跃响应：未检出阶跃（峰值跳变阈值 0.08 rad）")
-    print("十个时段误差 %s" % np.round(summary["window_errors"], 4))
-    summary["per_episode"] = [float(np.abs(item["error"]).mean()) for item in results]
-    arguments.report.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    per_joint_in_range = []
+    for joint in range(4):
+        mask = ~outside[:, :, joint]
+        per_joint_in_range.append(float(np.abs(errors[:, :, joint][mask]).mean()))
+    return {"mean_error": float(np.abs(errors).mean()),
+            "per_joint": np.abs(errors).mean(axis=(0, 1)).tolist(),
+            "per_joint_in_range": per_joint_in_range,
+            "in_range_error": float(np.abs(errors[~outside]).mean()),
+            "out_of_range_error": (float(np.abs(errors[outside]).mean())
+                                   if outside.any() else None),
+            "out_of_range_fraction": float(outside.mean()),
+            "hits_per_episode": float(hits.mean()), "max_hits": int(hits.max()),
+            "episodes_with_hits": int((hits > 0).sum()),
+            "closest_approach_deg": closest_approach(angles),
+            "step_peak_error": float(np.mean(peaks)) if peaks else None,
+            "step_recovery_steps": float(np.mean(recoveries)) if recoveries else None,
+            "step_count": len(peaks),
+            "error_windows": [float(np.abs(errors[:, window]).mean())
+                              for window in np.array_split(np.arange(episode_steps), 5)],
+            "per_episode": [float(np.abs(item["error"]).mean()) for item in results],
+            "per_episode_hits": hits.tolist()}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="自适应控制器评估")
+    parser.add_argument("--policy", type=Path, default=Path("data/rl_adaptive.pt"))
+    parser.add_argument("--compare", type=Path, default=None)
+    parser.add_argument("--episodes", type=int, default=8)
+    parser.add_argument("--episode-steps", type=int, default=1500)
+    parser.add_argument("--scales", type=str, default="0.0,0.5,1.0,1.5,2.0,2.5")
+    parser.add_argument("--drift-scales", type=str, default="0.0,0.2,0.35")
+    parser.add_argument("--drift-motor", type=float, default=0.3)
+    parser.add_argument("--noise-scale", type=float, default=1.0)
+    parser.add_argument("--bias-scale", type=float, default=1.0)
+    parser.add_argument("--seed-base", type=int, default=7000)
+    parser.add_argument("--report", type=Path, default=Path("data/rl_eval_adaptive.json"))
+    parser.add_argument("--threads", type=int, default=4)
+    arguments = parser.parse_args()
+    torch.set_num_threads(arguments.threads)
+    seeds = list(range(arguments.seed_base, arguments.seed_base + arguments.episodes))
+    agent = build_agent(arguments.policy)
+    baseline = build_agent(arguments.compare) if arguments.compare is not None else None
+
+    report = {"policy": str(arguments.policy), "compare": None if baseline is None
+              else str(arguments.compare), "episodes": arguments.episodes,
+              "episode_steps": arguments.episode_steps, "seed_base": arguments.seed_base,
+              "parameter_scale": {}, "drift": {}, "drift_frozen": {},
+              "drift_ratio": {}, "noise": {}, "bias": {}}
+
+    def run(agent_, **kwargs):
+        return [run_episode(agent_, seed, arguments.episode_steps,
+                            noise_scale=arguments.noise_scale,
+                            bias_scale=arguments.bias_scale, **kwargs)
+                for seed in seeds]
+
+    for scale in [float(item) for item in arguments.scales.split(",")]:
+        result = summarize_episodes(run(agent, parameter_scale=scale), arguments.episode_steps)
+        report["parameter_scale"][str(scale)] = result
+        line = ("参数尺度 %.1f：限位内误差 %.4f 限位内分关节 %s 撞限位 平均 %.2f/最大 %d "
+                "最近限位距离 %.1f 度 阶跃峰值 %s") % (
+            scale, result["in_range_error"],
+            np.round(result["per_joint_in_range"], 4),
+            result["hits_per_episode"], result["max_hits"],
+            result["closest_approach_deg"],
+            None if result["step_peak_error"] is None else round(result["step_peak_error"], 3))
+        print(line, flush=True)
+        if baseline is not None:
+            other = summarize_episodes(run(baseline, parameter_scale=scale),
+                                       arguments.episode_steps)
+            report.setdefault("compare_parameter_scale", {})[str(scale)] = other
+            print("  对照：限位内误差 %.4f 分关节 %s 撞限位 平均 %.2f/最大 %d" % (
+                other["in_range_error"], np.round(other["per_joint"], 4),
+                other["hits_per_episode"], other["max_hits"]), flush=True)
+
+    for drift in [float(item) for item in arguments.drift_scales.split(",")]:
+        result = summarize_episodes(
+            run(agent, parameter_scale=1.0, drift_scale=drift,
+                drift_motor=arguments.drift_motor * (1.0 if drift > 0.0 else 0.0)),
+            arguments.episode_steps)
+        report["drift"][str(drift)] = result
+        line = ("漂移 %.2f：限位内误差 %.4f 限位内分关节 %s 撞限位 平均 %.2f/最大 %d "
+                "五个时段 %s" % (
+                    drift, result["in_range_error"],
+                    np.round(result["per_joint_in_range"], 4),
+                    result["hits_per_episode"], result["max_hits"],
+                    np.round(result["error_windows"], 4)))
+        if drift > 0.0:
+            frozen = summarize_episodes(
+                run(agent, parameter_scale=1.0, drift_scale=drift,
+                    drift_motor=arguments.drift_motor, freeze_drift=True),
+                arguments.episode_steps)
+            report["drift_frozen"][str(drift)] = frozen
+            report["drift_ratio"][str(drift)] = (
+                result["in_range_error"] / frozen["in_range_error"])
+            line += " | 冻结对照 %.4f（比值 %.2f）撞限位 平均 %.2f/最大 %d" % (
+                frozen["in_range_error"], report["drift_ratio"][str(drift)],
+                frozen["hits_per_episode"], frozen["max_hits"])
+        print(line, flush=True)
+
+    for name, kwargs in (("noise", {"noise_scale": 4.0}), ("bias", {"bias_scale": 3.0})):
+        results = [run_episode(agent, seed, arguments.episode_steps, 1.5,
+                               noise_scale=kwargs.get("noise_scale", 1.0),
+                               bias_scale=kwargs.get("bias_scale", 1.0))
+                   for seed in seeds]
+        result = summarize_episodes(results, arguments.episode_steps)
+        report[name]["scale"] = result
+        print("%s 放大：限位内误差 %.4f 撞限位 平均 %.2f/最大 %d" % (
+            "噪声" if name == "noise" else "偏差", result["in_range_error"],
+            result["hits_per_episode"], result["max_hits"]), flush=True)
+
+    arguments.report.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    archive_results = run(agent, parameter_scale=0.0)
     np.savez_compressed(arguments.report.with_suffix(".npz"),
-                        error=errors, action=np.stack([i["action"] for i in results]),
-                        angle=np.stack([i["angle"] for i in results]),
-                        reference=references,
-                        context=np.stack([i["context"] for i in results]),
-                        contexts=contexts,
-                        hidden=np.stack([i["hidden"] for i in results]),
-                        parameters=np.stack([i["parameters"] for i in results]))
+                        error=np.stack([item["error"] for item in archive_results]),
+                        angle=np.stack([item["angle"] for item in archive_results]),
+                        reference=np.stack([item["reference"] for item in archive_results]))
     print("已保存", arguments.report)
 
 

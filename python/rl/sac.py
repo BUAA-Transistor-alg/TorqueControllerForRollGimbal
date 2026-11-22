@@ -1,13 +1,16 @@
-"""带序列回放的 SAC：循环策略与循环动作价值网络。
+"""带序列回放的 SAC：结构化残差循环策略、循环动作价值网络与辅助头。
 
-回放缓冲按回合保存观测、动作、奖励、终止标志与各网络在每一步的上下文，
-更新时抽取固定长度窗口并沿时间展开求梯度；窗口起点处用回放时保存的上下文作为
-初始状态，从而让梯度只需要覆盖窗口长度。
+回放缓冲按回合保存观测、动作、奖励、终止标志、各网络每一步的上下文，以及辅助目标需要的
+监督量（真实关节状态、真实角加速度、规范固定参数标签、当前等效扰动与有效惯量、负载、教师动作）。
+更新时抽取固定长度窗口，窗口起点用回放时保存的上下文作为初始状态，梯度只覆盖窗口长度。
 
-第二阶段额外加入两项针对上下文的软约束：
-- 稳定项：控制一段时间之后，规范化上下文的逐步变化尽量小；
-- 熵项：收敛上下文的分布熵尽量大，防止上下文退化为固定值；该系数按 SAC 的
-  最大熵思想用对偶上升自动调节，目标是预先给定的上下文熵。
+辅助损失把梯度回传到策略编码器：
+
+- 动力学预测：慢路上下文 + 当前动作 + 真实状态 → 下一拍真实角加速度；
+- 参数回归：慢路上下文 → 规范固定参数标签（28 维可辨识坐标 + 4 维相对电机增益）；
+- 响应回归：慢路上下文 + 当前真实状态 → 当前等效扰动与有效惯量（动作单位）；
+- 负载回归：慢路原始状态 → 动作失配滑动平均，监督在线扰动估计的递推；
+- 残差行为克隆：策略残差与"教师动作减结构化动作"比较，权重很小，只作为锚定。
 """
 
 from __future__ import annotations
@@ -24,28 +27,17 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from networks import RecurrentActor, RecurrentCritic
+from networks import (DynamicsHead, LoadHead, ParameterHead, RecurrentActor,
+                      RecurrentCritic, ResponseHead)
 
-
-class ParameterExtractor(nn.Module):
-    """把收敛上下文映射到可辨识参数坐标，梯度回传到策略编码器。"""
-
-    def __init__(self, input_dim: int, output_dim: int, layer_dim: int = 128):
-        super().__init__()
-        self.body = nn.Sequential(nn.LayerNorm(input_dim), nn.Linear(input_dim, layer_dim),
-                                  nn.ReLU(), nn.Linear(layer_dim, output_dim))
-
-    def forward(self, inputs):
-        return self.body(inputs)
+ACCELERATION_TARGET_SCALE = 50.0
+PARAMETER_DIMENSION = 32
+RESPONSE_DIMENSION = 12
 
 
 class SequenceBuffer:
-    def __init__(self, capacity_episodes: int, observation_dim: int, action_dim: int,
-                 hidden_dim: int, device=None):
+    def __init__(self, capacity_episodes: int, device=None):
         self.capacity = capacity_episodes
-        self.observation_dim = observation_dim
-        self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
         self.episodes = []
         self.device = device or torch.device("cpu")
 
@@ -57,117 +49,125 @@ class SequenceBuffer:
     def __len__(self):
         return len(self.episodes)
 
-    def sample_windows(self, batch: int, length: int, generator=None):
+    def sample_windows(self, batch: int, length: int):
         indices = np.random.randint(0, len(self.episodes), batch)
-        starts = []
-        for index in indices:
-            episode = self.episodes[index]
-            starts.append(np.random.randint(0, len(episode["action"]) - length))
-        observation = np.stack([self.episodes[i]["observation"][s:s + length + 1]
-                                for i, s in zip(indices, starts)])
-        action = np.stack([self.episodes[i]["action"][s:s + length]
-                           for i, s in zip(indices, starts)])
-        reward = np.stack([self.episodes[i]["reward"][s:s + length]
-                           for i, s in zip(indices, starts)])
-        done = np.stack([self.episodes[i]["done"][s:s + length]
-                         for i, s in zip(indices, starts)])
-        hidden_actor = np.stack([self.episodes[i]["hidden_actor"][s]
-                                 for i, s in zip(indices, starts)])
-        hidden_critic_one = np.stack([self.episodes[i]["hidden_critic_one"][s]
-                                      for i, s in zip(indices, starts)])
-        hidden_critic_two = np.stack([self.episodes[i]["hidden_critic_two"][s]
-                                      for i, s in zip(indices, starts)])
-        steps = np.stack([np.arange(s, s + length) for s in starts])
-        return {
-            "observation": torch.as_tensor(observation, dtype=torch.float32, device=self.device),
-            "action": torch.as_tensor(action, dtype=torch.float32, device=self.device),
-            "reward": torch.as_tensor(reward, dtype=torch.float32, device=self.device),
-            "done": torch.as_tensor(done, dtype=torch.float32, device=self.device),
-            "hidden_actor": torch.as_tensor(hidden_actor, dtype=torch.float32, device=self.device),
-            "hidden_critic_one": torch.as_tensor(hidden_critic_one, dtype=torch.float32, device=self.device),
-            "hidden_critic_two": torch.as_tensor(hidden_critic_two, dtype=torch.float32, device=self.device),
-            "steps": torch.as_tensor(steps, dtype=torch.long),
-        }
+        starts = [np.random.randint(0, len(self.episodes[i]["action"]) - length)
+                  for i in indices]
 
-    def sample_converged(self, batch: int, length: int):
-        """从每个回合末尾取固定长度的窗口，返回观测、初始上下文与参数可辨识坐标。"""
-        indices = np.random.randint(0, len(self.episodes), batch)
-        windows = []
-        hidden = []
-        targets = []
-        for index in indices:
-            episode = self.episodes[index]
-            total = len(episode["action"])
-            start = max(0, total - length)
-            windows.append(episode["observation"][start:start + length])
-            hidden.append(episode["hidden_actor"][start])
-            targets.append(episode["coordinates"])
-        return (torch.as_tensor(np.stack(windows), dtype=torch.float32, device=self.device),
-                torch.as_tensor(np.stack(hidden), dtype=torch.float32, device=self.device),
-                torch.as_tensor(np.stack(targets), dtype=torch.float32, device=self.device))
+        def stack(key, offset=0, extra=0):
+            return np.stack([self.episodes[i][key][s + offset:s + offset + length + extra]
+                             for i, s in zip(indices, starts)])
+
+        arrays = {"observation": stack("observation", 0, 1), "action": stack("action"),
+                  "reward": stack("reward"), "done": stack("done"),
+                  "hidden_actor": np.stack([self.episodes[i]["hidden_actor"][s]
+                                            for i, s in zip(indices, starts)]),
+                  "hidden_critic_one": np.stack([self.episodes[i]["hidden_critic_one"][s]
+                                                 for i, s in zip(indices, starts)]),
+                  "hidden_critic_two": np.stack([self.episodes[i]["hidden_critic_two"][s]
+                                                 for i, s in zip(indices, starts)]),
+                  "state": stack("state"), "acceleration": stack("acceleration"),
+                  "target": stack("target"), "response": stack("response"),
+                  "teacher": stack("teacher")}
+        return {key: torch.as_tensor(value, dtype=torch.float32, device=self.device)
+                for key, value in arrays.items()}
 
 
 class RecurrentSAC:
-    def __init__(self, observation_dim: int, action_dim: int, hidden_dim: int = 64,
-                 layer_dim: int = 128, gamma: float = 0.99, tau: float = 0.005,
-                 learning_rate: float = 3e-4, alpha_learning_rate: float = 3e-4,
-                 target_entropy: float = None, gate_bias: float = 2.0,
-                 stability_weight: float = 0.0, stability_warmup: int = 0,
-                 context_entropy_target: float = 0.0,
-                 context_entropy_learning_rate: float = 1e-3,
-                 context_entropy_weight: float = 0.0,
-                 extractor_weight: float = 0.0,
-                 extractor_layer_dim: int = 128,
-                 extractor_learning_rate: float = 3e-4,
-                 probe_learning_rate: float = 3.0e-4,
-                 coordinate_mean=None, coordinate_std=None):
+    def __init__(self, observation_dim: int, action_dim: int, fast_input_dim: int,
+                 fast_dim: int = 64, slow_dim: int = 64, state_dim: int = 18,
+                 layer_dim: int = 256, gamma: float = 0.99, tau: float = 0.005,
+                 learning_rate: float = 3.0e-4, alpha_learning_rate: float = 3.0e-4,
+                 target_entropy: float = None, fast_bias: float = 2.0,
+                 slow_gate_bias: float = 2.0, dynamics_weight: float = 0.2,
+                 parameter_weight: float = 0.2, response_weight: float = 0.2,
+                 load_weight: float = 1.0, behavior_weight: float = 0.0,
+                 auxiliary_learning_rate: float = 3.0e-4,
+                 auxiliary_weight_decay: float = 1.0e-2, parameter_mean=None,
+                 parameter_std=None, response_mean=None, response_std=None,
+                 structured_weights=None, residual_scale: float = 0.3,
+                 head_learning_rate: float = 3.0e-4, alpha_init: float = -2.0,
+                 load_from_state: bool = False, fixed_log_std: bool = True,
+                 log_std_init: float = -2.0):
         self.observation_dim = observation_dim
         self.action_dim = action_dim
+        self.state_dim = state_dim
         self.gamma = gamma
         self.tau = tau
-        self.stability_weight = stability_weight
-        self.stability_warmup = stability_warmup
-        self.context_entropy_weight = context_entropy_weight
-        self.context_entropy_target = context_entropy_target
-        self.actor = RecurrentActor(observation_dim, action_dim, hidden_dim, layer_dim, gate_bias)
-        self.critic_one = RecurrentCritic(observation_dim, action_dim, hidden_dim, layer_dim, gate_bias)
-        self.critic_two = RecurrentCritic(observation_dim, action_dim, hidden_dim, layer_dim, gate_bias)
+        self.fast_dim = fast_dim
+        self.slow_dim = slow_dim
+        self.hidden_dim = fast_dim + slow_dim
+        self.dynamics_weight = float(dynamics_weight)
+        self.parameter_weight = float(parameter_weight)
+        self.response_weight = float(response_weight)
+        self.load_weight = float(load_weight)
+        self.behavior_weight = float(behavior_weight)
+        self.actor = RecurrentActor(observation_dim, action_dim, fast_input_dim, fast_dim,
+                                    slow_dim, layer_dim, fast_bias, slow_gate_bias,
+                                    structured_weights=structured_weights,
+                                    residual_scale=residual_scale,
+                                    load_from_state=load_from_state,
+                                    fixed_log_std=fixed_log_std,
+                                    log_std_init=log_std_init,
+                                    load_mean=None if response_mean is None else np.asarray(
+                                        response_mean)[8:],
+                                    load_std=None if response_std is None else np.asarray(
+                                        response_std)[8:])
+        self.critic_one = RecurrentCritic(observation_dim, action_dim, fast_input_dim,
+                                          fast_dim, slow_dim, layer_dim, fast_bias,
+                                          slow_gate_bias)
+        self.critic_two = RecurrentCritic(observation_dim, action_dim, fast_input_dim,
+                                          fast_dim, slow_dim, layer_dim, fast_bias,
+                                          slow_gate_bias)
         self.target_actor = copy.deepcopy(self.actor)
         self.target_critic_one = copy.deepcopy(self.critic_one)
         self.target_critic_two = copy.deepcopy(self.critic_two)
         for network in (self.target_actor, self.target_critic_one, self.target_critic_two):
             for parameter in network.parameters():
                 parameter.requires_grad_(False)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=learning_rate)
+        # 慢路与负载头构成在线扰动估计器：按一阶滑动平均解析初始化后冻结，
+        # 只让快路、残差头与辅助探针头训练，避免训练过程破坏前馈补偿所依赖的估计。
+        for parameter in self.actor.encoder.slow.parameters():
+            parameter.requires_grad_(False)
+        for parameter in self.actor.load_head.parameters():
+            parameter.requires_grad_(False)
+        self.dynamics_head = DynamicsHead(slow_dim, action_dim, state_dim)
+        self.parameter_head = ParameterHead(slow_dim, PARAMETER_DIMENSION)
+        self.response_head = ResponseHead(slow_dim, state_dim, RESPONSE_DIMENSION - 4)
+        self.actor_optimizer = torch.optim.Adam(
+            list(self.actor.body.parameters()) + list(self.actor.mean.parameters()),
+            lr=learning_rate)
+        head_parameters = (list(self.dynamics_head.parameters())
+                           + list(self.parameter_head.parameters())
+                           + list(self.response_head.parameters()))
+        self.auxiliary_optimizer = torch.optim.Adam([
+            {"params": list(self.actor.parameters()), "lr": auxiliary_learning_rate},
+            {"params": head_parameters, "lr": head_learning_rate,
+             "weight_decay": auxiliary_weight_decay}])
         self.critic_one_optimizer = torch.optim.Adam(self.critic_one.parameters(),
                                                      lr=learning_rate)
         self.critic_two_optimizer = torch.optim.Adam(self.critic_two.parameters(),
                                                      lr=learning_rate)
-        self.log_alpha = torch.tensor(0.0, requires_grad=True)
+        self.log_alpha = torch.tensor(float(alpha_init), requires_grad=True)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=alpha_learning_rate)
         self.target_entropy = float(-action_dim if target_entropy is None else target_entropy)
-        self.log_context_lambda = torch.tensor(0.0, requires_grad=True)
-        self.context_optimizer = torch.optim.Adam([self.log_context_lambda],
-                                                  lr=context_entropy_learning_rate)
-        self.extractor_weight = float(extractor_weight)
-        self.extractor = ParameterExtractor(hidden_dim, 28, extractor_layer_dim)
-        self.extractor_optimizer = torch.optim.Adam(self.extractor.parameters(),
-                                                    lr=extractor_learning_rate,
-                                                    weight_decay=1.0e-2)
-        self.probe_optimizer = torch.optim.Adam(self.extractor.parameters(),
-                                                lr=probe_learning_rate, weight_decay=1.0e-2)
-        self.coordinate_mean = (torch.zeros(28) if coordinate_mean is None
-                                else torch.as_tensor(coordinate_mean, dtype=torch.float32))
-        self.coordinate_std = (torch.ones(28) if coordinate_std is None
-                               else torch.as_tensor(coordinate_std, dtype=torch.float32))
+        self.parameter_mean = self._tensor(parameter_mean, PARAMETER_DIMENSION)
+        self.parameter_std = self._tensor(parameter_std, PARAMETER_DIMENSION, ones=True)
+        self.response_mean = self._tensor(response_mean, RESPONSE_DIMENSION)
+        self.response_std = self._tensor(response_std, RESPONSE_DIMENSION, ones=True)
+        with torch.no_grad():
+            self.actor.load_from_state = bool(load_from_state)
+        self.load_in_observation = True
+
+    @staticmethod
+    def _tensor(values, dimension, ones=False):
+        if values is None:
+            return torch.ones(dimension) if ones else torch.zeros(dimension)
+        return torch.as_tensor(np.asarray(values), dtype=torch.float32)
 
     @property
     def alpha(self):
         return self.log_alpha.exp()
-
-    @property
-    def context_lambda(self):
-        return self.log_context_lambda.exp()
 
     def initial_hidden(self, batch: int):
         return (self.actor.initial_state(batch), self.critic_one.initial_state(batch),
@@ -176,60 +176,50 @@ class RecurrentSAC:
     @torch.no_grad()
     def act(self, observation, hidden, deterministic: bool = False):
         mean, log_std, hidden_actor = self.actor.step(observation, hidden[0])
+        structured = self.actor.structured_action(observation, hidden_actor)
         if deterministic:
-            action = torch.tanh(mean)
+            action = self.actor.deterministic(mean, structured)
             log_probability = torch.zeros(mean.shape[0])
         else:
-            action, log_probability = self.actor.sample(mean, log_std)
+            action, log_probability = self.actor.sample(mean, log_std, structured)
         return action, log_probability, (hidden_actor, hidden[1], hidden[2])
 
     @torch.no_grad()
     def act_partial(self, observation, hidden_actor, deterministic: bool = False):
-        """只推进策略编码器，返回动作与新的上下文。"""
         mean, log_std, hidden_actor = self.actor.step(observation, hidden_actor)
+        structured = self.actor.structured_action(observation, hidden_actor)
         if deterministic:
-            action = torch.tanh(mean)
+            action = self.actor.deterministic(mean, structured)
         else:
-            action, _ = self.actor.sample(mean, log_std)
+            action, _ = self.actor.sample(mean, log_std, structured)
         return action, None, hidden_actor
 
-    def converged_context(self, windows, hidden):
-        """由一段观测窗口与其起始上下文算出收敛上下文的平均（可带梯度）。"""
-        converged = self.actor.encoder(windows, hidden)
-        return self.actor.normalization(converged).mean(dim=1)
+    @torch.no_grad()
+    def residual_action(self, observation, hidden_actor):
+        """给定观测与上下文返回残差动作（不含结构化前馈），用于诊断。"""
+        structured = self.actor.structured_action(observation)
+        mean, _ = self.actor.head_from_hidden(hidden_actor)
+        return self.actor.residual_scale * torch.tanh(mean), structured
 
-    def update_extractor_probe(self, contexts, coordinates, steps: int = 4,
-                               batch: int = 128):
-        """用滚动采集的（上下文，参数坐标）样本训练提取器；只更新提取器。"""
-        count = contexts.shape[0]
-        if count < 2:
-            return 0.0
-        loss_value = 0.0
-        for _ in range(steps):
-            index = torch.randint(0, count, (min(batch, count),))
-            prediction = self.extractor(contexts[index])
-            target = (coordinates[index] - self.coordinate_mean) / self.coordinate_std
-            loss = ((prediction - target) ** 2).mean()
-            self.probe_optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.extractor.parameters(), 5.0)
-            self.probe_optimizer.step()
-            loss_value = float(loss.detach())
-        return loss_value
+    @torch.no_grad()
+    def parameter_prediction(self, observation_window, initial_hidden=None):
+        hidden = self.actor.encoder(observation_window, initial_hidden)
+        slow = self.actor.slow_features(hidden)
+        prediction = self.parameter_head(slow)
+        return prediction * self.parameter_std + self.parameter_mean
 
-    def actor_auxiliary(self, windows, hidden, coordinates, weight: float):
-        """把提取器在新鲜样本上的误差回传到策略编码器，鼓励上下文携带参数信息。"""
-        if weight <= 0.0:
-            return 0.0
-        context = self.converged_context(windows, hidden)
-        prediction = self.extractor(context)
-        target = (coordinates - self.coordinate_mean) / self.coordinate_std
-        loss = ((prediction - target) ** 2).mean()
-        self.actor_optimizer.zero_grad()
-        (weight * loss).backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 5.0)
-        self.actor_optimizer.step()
-        return float(loss.detach())
+    @torch.no_grad()
+    def response_prediction(self, observation_window, state, initial_hidden=None):
+        hidden = self.actor.encoder(observation_window, initial_hidden)
+        slow = self.actor.slow_features(hidden)
+        prediction = self.response_head(slow, state)
+        return prediction * self.response_std[:8] + self.response_mean[:8]
+
+    @torch.no_grad()
+    def load_prediction(self, observation_window, initial_hidden=None):
+        hidden = self.actor.encoder(observation_window, initial_hidden)
+        slow = self.actor.slow_features(hidden)
+        return self.actor.predict_load(hidden)
 
     def update_critics(self, batch):
         observation = batch["observation"]
@@ -238,20 +228,23 @@ class RecurrentSAC:
         done = batch["done"]
         length = action.shape[1]
         with torch.no_grad():
-            hidden_actor = self.target_actor.encoder(observation,
-                                                     batch["hidden_actor"])
+            hidden_actor = self.target_actor.encoder(observation, batch["hidden_actor"])
             hidden_one = self.target_critic_one.encoder(observation,
                                                         batch["hidden_critic_one"])
             hidden_two = self.target_critic_two.encoder(observation,
                                                         batch["hidden_critic_two"])
-            mean, log_std, _ = self.target_actor.step(observation[:, 1:].reshape(
-                -1, self.observation_dim), hidden_actor[:, 1:].reshape(-1, hidden_actor.shape[-1]))
-            next_action, _ = self.target_actor.sample(mean, log_std)
+            mean, log_std = self.target_actor.head_from_hidden(
+                hidden_actor[:, 1:].reshape(-1, self.hidden_dim))
+            next_structured = self.target_actor.structured_action(
+                observation[:, 1:], hidden_actor[:, 1:]).reshape(-1, self.action_dim)
+            next_action, _ = self.target_actor.sample(mean, log_std, next_structured)
             next_action = next_action.reshape(observation.shape[0], length, self.action_dim)
             target_one = self.target_critic_one.evaluate(
-                hidden_one[:, 1:].reshape(-1, hidden_one.shape[-1]), next_action.reshape(-1, self.action_dim))
+                hidden_one[:, 1:].reshape(-1, self.hidden_dim),
+                next_action.reshape(-1, self.action_dim))
             target_two = self.target_critic_two.evaluate(
-                hidden_two[:, 1:].reshape(-1, hidden_two.shape[-1]), next_action.reshape(-1, self.action_dim))
+                hidden_two[:, 1:].reshape(-1, self.hidden_dim),
+                next_action.reshape(-1, self.action_dim))
             target_value = torch.minimum(target_one, target_two).reshape(reward.shape)
             target = reward + self.gamma * (1.0 - done) * target_value
         hidden_one = self.critic_one.encoder(observation[:, :length],
@@ -259,9 +252,11 @@ class RecurrentSAC:
         hidden_two = self.critic_two.encoder(observation[:, :length],
                                              batch["hidden_critic_two"])
         prediction_one = self.critic_one.evaluate(
-            hidden_one.reshape(-1, hidden_one.shape[-1]), action.reshape(-1, self.action_dim)).reshape(reward.shape)
+            hidden_one.reshape(-1, self.hidden_dim),
+            action.reshape(-1, self.action_dim)).reshape(reward.shape)
         prediction_two = self.critic_two.evaluate(
-            hidden_two.reshape(-1, hidden_two.shape[-1]), action.reshape(-1, self.action_dim)).reshape(reward.shape)
+            hidden_two.reshape(-1, self.hidden_dim),
+            action.reshape(-1, self.action_dim)).reshape(reward.shape)
         loss_one = F.mse_loss(prediction_one, target)
         loss_two = F.mse_loss(prediction_two, target)
         self.critic_one_optimizer.zero_grad()
@@ -274,61 +269,87 @@ class RecurrentSAC:
         self.critic_two_optimizer.step()
         return float(loss_one.detach()), float(target.mean())
 
-    def update_actor(self, batch, buffer, converged_length: int = 32,
-                     converged_batch: int = 32):
+    def auxiliary_losses(self, auxiliary_batch):
+        """辅助监督损失：参数回归、响应回归、动力学预测与行为克隆。"""
+        observation = auxiliary_batch["observation"][:, :-1]
+        hidden = self.actor.encoder(observation, auxiliary_batch["hidden_actor"])
+        return self.auxiliary_from_hidden(auxiliary_batch, hidden)
+
+    def auxiliary_from_hidden(self, auxiliary_batch, hidden):
+        observation = auxiliary_batch["observation"][:, :-1]
+        slow = self.actor.slow_features(hidden).detach()
+        parameter_target = ((auxiliary_batch["target"] - self.parameter_mean)
+                            / self.parameter_std)
+        parameter_loss = F.mse_loss(self.parameter_head(slow), parameter_target)
+        response_target = ((auxiliary_batch["response"] - self.response_mean)
+                           / self.response_std)
+        response_loss = F.mse_loss(
+            self.response_head(slow, auxiliary_batch["state"]), response_target[..., :8])
+        raw_slow = self.actor.encoder.split(hidden)[1]
+        load_loss = F.mse_loss(self.actor.load_head(raw_slow.detach()),
+                                response_target[..., 8:])
+        dynamics_loss = F.mse_loss(
+            self.dynamics_head(slow, auxiliary_batch["action"], auxiliary_batch["state"]),
+            auxiliary_batch["acceleration"] / ACCELERATION_TARGET_SCALE)
+        mean, _ = self.actor.head_from_hidden(hidden.reshape(-1, self.hidden_dim))
+        teacher = auxiliary_batch["teacher"].reshape(-1, self.action_dim)
+        structured = self.actor.structured_action(
+            observation, hidden).detach().reshape(-1, self.action_dim)
+        behavior_loss = F.mse_loss(torch.tanh(mean), teacher - structured)
+        total = (self.parameter_weight * parameter_loss
+                 + self.response_weight * response_loss
+                 + self.load_weight * load_loss
+                 + self.dynamics_weight * dynamics_loss
+                 + self.behavior_weight * behavior_loss)
+        return total, {"parameter_loss": float(parameter_loss.detach()),
+                       "response_loss": float(response_loss.detach()),
+                       "load_loss": float(load_loss.detach()),
+                       "dynamics_loss": float(dynamics_loss.detach()),
+                       "behavior_loss": float(behavior_loss.detach())}
+
+    def update_actor(self, batch, auxiliary_batch=None):
         observation = batch["observation"][:, :-1]
-        length = observation.shape[1]
+        # 策略损失训练快路与残差头；慢路状态（负载估计）视为固定特征，
+        # 避免价值梯度改写结构化前馈所依赖的在线估计。
         hidden_actor = self.actor.encoder(observation, batch["hidden_actor"])
-        hidden_critic_one = self.critic_one.encoder(observation, batch["hidden_critic_one"])
-        hidden_critic_two = self.critic_two.encoder(observation, batch["hidden_critic_two"])
-        mean, log_std, _ = self.actor.step(observation.reshape(-1, self.observation_dim),
-                                           hidden_actor.reshape(-1, hidden_actor.shape[-1]))
-        action, log_probability = self.actor.sample(mean, log_std)
-        value_one = self.critic_one.evaluate(hidden_critic_one.reshape(
-            -1, hidden_critic_one.shape[-1]), action)
-        value_two = self.critic_two.evaluate(hidden_critic_two.reshape(
-            -1, hidden_critic_two.shape[-1]), action)
+        hidden_actor = torch.cat([hidden_actor[..., :self.fast_dim],
+                                  hidden_actor[..., self.fast_dim:].detach()], dim=-1)
+        with torch.no_grad():
+            hidden_critic_one = self.critic_one.encoder(observation,
+                                                        batch["hidden_critic_one"])
+            hidden_critic_two = self.critic_two.encoder(observation,
+                                                        batch["hidden_critic_two"])
+        structured = self.actor.structured_action(
+            observation, hidden_actor).reshape(-1, self.action_dim)
+        mean, log_std = self.actor.head_from_hidden(
+            hidden_actor.reshape(-1, self.hidden_dim))
+        action, log_probability = self.actor.sample(mean, log_std, structured)
+        value_one = self.critic_one.evaluate(
+            hidden_critic_one.reshape(-1, self.hidden_dim), action)
+        value_two = self.critic_two.evaluate(
+            hidden_critic_two.reshape(-1, self.hidden_dim), action)
         value = torch.minimum(value_one, value_two)
         loss_actor = (self.alpha.detach() * log_probability - value).mean()
-
-        # 上下文正则都作用在方向归一化后的上下文上，消除靠放大尺度绕过惩罚的可能
-        stability = torch.tensor(0.0)
-        if self.stability_weight > 0.0:
-            directions = F.normalize(hidden_actor, dim=-1)
-            differences = ((directions[:, 1:] - directions[:, :-1]) ** 2).sum(dim=-1)
-            mask = (batch["steps"][:, 1:] > self.stability_warmup).float()
-            stability = (differences * mask).sum() / mask.sum().clamp(min=1.0)
-            loss_actor = loss_actor + self.stability_weight * stability
-
-        context_entropy = torch.tensor(0.0)
-        extractor_loss = torch.tensor(0.0)
-        if self.context_entropy_weight > 0.0 or self.extractor_weight > 0.0:
-            converged_observation, converged_hidden, targets = buffer.sample_converged(
-                converged_batch, converged_length)
-            converged = self.actor.encoder(converged_observation, converged_hidden)
-            context_mean = self.actor.normalization(converged).mean(dim=1)
-            if self.context_entropy_weight > 0.0:
-                # 归一化熵：各维方差相对均匀分布的比值，均匀分布时为 0，常值为负无穷
-                variance = context_mean.var(dim=0) + 1.0e-4
-                context_entropy = 0.5 * torch.log(
-                    variance * self.actor.encoder.hidden_dim).mean()
-                loss_actor = loss_actor - self.context_lambda * context_entropy
-            if self.extractor_weight > 0.0:
-                prediction = self.extractor(context_mean)
-                extractor_loss = (((prediction - targets) ** 2)
-                                  * self.coordinate_weights).mean()
-                loss_actor = loss_actor + self.extractor_weight * extractor_loss
-
-        self.actor_optimizer.zero_grad()
-        self.extractor_optimizer.zero_grad()
-        loss_actor.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
-        self.actor_optimizer.step()
-        if self.extractor_weight > 0.0:
-            torch.nn.utils.clip_grad_norm_(self.extractor.parameters(), 10.0)
-            self.extractor_optimizer.step()
-
-        # 温度系数：熵高于目标则降低 alpha
+        statistics = {"actor_loss": 0.0, "alpha": float(self.alpha.detach()),
+                      "log_probability": float(log_probability.mean().detach())}
+        if auxiliary_batch is not None:
+            auxiliary_loss, auxiliary_statistics = self.auxiliary_losses(auxiliary_batch)
+            loss_actor = loss_actor + auxiliary_loss
+            statistics.update(auxiliary_statistics)
+            self.auxiliary_optimizer.zero_grad()
+            loss_actor.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
+            for head in (self.parameter_head, self.response_head, self.actor.load_head,
+                         self.dynamics_head):
+                torch.nn.utils.clip_grad_norm_(head.parameters(), 10.0)
+            self.auxiliary_optimizer.step()
+        else:
+            self.actor_optimizer.zero_grad()
+            loss_actor.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.body.parameters(), 10.0)
+            torch.nn.utils.clip_grad_norm_(self.actor.mean.parameters(), 10.0)
+            self.actor_optimizer.step()
+        statistics["actor_loss"] = float(loss_actor.detach())
         alpha_loss = -(self.log_alpha * (log_probability.detach()
                                          + self.target_entropy)).mean()
         self.alpha_optimizer.zero_grad()
@@ -336,24 +357,22 @@ class RecurrentSAC:
         self.alpha_optimizer.step()
         with torch.no_grad():
             self.log_alpha.clamp_(-10.0, 2.0)
-
-        if self.context_entropy_weight > 0.0:
-            context_loss = self.log_context_lambda * (context_entropy.detach()
-                                                      - self.context_entropy_target)
-            self.context_optimizer.zero_grad()
-            context_loss.backward()
-            self.context_optimizer.step()
-            with torch.no_grad():
-                self.log_context_lambda.clamp_(-8.0, 4.0)
-
         self.soft_update()
-        return {"actor_loss": float(loss_actor.detach()),
-                "alpha": float(self.alpha.detach()),
-                "stability": float(stability.detach()),
-                "context_entropy": float(context_entropy.detach()),
-                "extractor_loss": float(extractor_loss.detach()),
-                "context_lambda": float(self.context_lambda.detach()),
-                "log_probability": float(log_probability.mean().detach())}
+        return statistics
+
+    def update_auxiliary_supervised(self, auxiliary_batch):
+        """只用监督目标更新编码器与辅助头，返回损失统计与窗口末端的上下文（用于分块展开）。"""
+        observation = auxiliary_batch["observation"][:, :-1]
+        hidden = self.actor.encoder(observation, auxiliary_batch["hidden_actor"])
+        auxiliary_loss, statistics = self.auxiliary_from_hidden(auxiliary_batch, hidden)
+        self.auxiliary_optimizer.zero_grad()
+        auxiliary_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
+        for head in (self.parameter_head, self.response_head, self.actor.load_head,
+                     self.dynamics_head):
+            torch.nn.utils.clip_grad_norm_(head.parameters(), 10.0)
+        self.auxiliary_optimizer.step()
+        return statistics, hidden[:, -1].detach()
 
     def soft_update(self):
         with torch.no_grad():
@@ -371,28 +390,41 @@ class RecurrentSAC:
                     "target_actor": self.target_actor.state_dict(),
                     "target_critic_one": self.target_critic_one.state_dict(),
                     "target_critic_two": self.target_critic_two.state_dict(),
+                    "dynamics_head": self.dynamics_head.state_dict(),
+                    "parameter_head": self.parameter_head.state_dict(),
+                    "response_head": self.response_head.state_dict(),
                     "log_alpha": self.log_alpha.detach(),
-                    "log_context_lambda": self.log_context_lambda.detach(),
-                    "extractor": self.extractor.state_dict(),
-                    "coordinate_mean": self.coordinate_mean,
-                    "coordinate_std": self.coordinate_std}, path)
+                    "load_from_state": bool(self.actor.load_from_state),
+                    "load_in_observation": bool(self.load_in_observation),
+                    "residual_scale": float(self.actor.residual_scale),
+                    "parameter_mean": self.parameter_mean,
+                    "parameter_std": self.parameter_std,
+                    "response_mean": self.response_mean,
+                    "response_std": self.response_std}, path)
 
-    def load(self, path: Path):
+    def load(self, path: Path, load_actor_only: bool = False):
         payload = torch.load(path, map_location="cpu", weights_only=False)
+        if load_actor_only:
+            self.actor.load_state_dict(payload["actor"])
+            return
         self.actor.load_state_dict(payload["actor"])
         self.critic_one.load_state_dict(payload["critic_one"])
         self.critic_two.load_state_dict(payload["critic_two"])
         self.target_actor.load_state_dict(payload["target_actor"])
         self.target_critic_one.load_state_dict(payload["target_critic_one"])
         self.target_critic_two.load_state_dict(payload["target_critic_two"])
-        if "extractor" in payload:
-            try:
-                self.extractor.load_state_dict(payload["extractor"])
-            except RuntimeError:
-                print("提取器结构变化，重新初始化")
-        if "coordinate_mean" in payload:
-            self.coordinate_mean = payload["coordinate_mean"]
-            self.coordinate_std = payload["coordinate_std"]
+        self.dynamics_head.load_state_dict(payload["dynamics_head"])
+        self.parameter_head.load_state_dict(payload["parameter_head"])
+        self.response_head.load_state_dict(payload["response_head"])
+        if "load_from_state" in payload:
+            self.actor.load_from_state = bool(payload["load_from_state"])
+        if "load_in_observation" in payload:
+            self.load_in_observation = bool(payload["load_in_observation"])
+        if "residual_scale" in payload:
+            self.actor.residual_scale = float(payload["residual_scale"])
+        self.parameter_mean = payload["parameter_mean"]
+        self.parameter_std = payload["parameter_std"]
+        self.response_mean = payload["response_mean"]
+        self.response_std = payload["response_std"]
         with torch.no_grad():
             self.log_alpha.copy_(payload["log_alpha"])
-            self.log_context_lambda.copy_(payload["log_context_lambda"])

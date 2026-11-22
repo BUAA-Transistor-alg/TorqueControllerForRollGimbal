@@ -1,21 +1,30 @@
 """四自由度串链动力学可视化。
 
-PyBullet 只用于显示与键盘交互，不参与动力学计算；每个渲染帧调用 C 接口中的
-双精度前向仿真若干步，再把各连杆的位姿同步到 PyBullet 的可视化物体上。
+PyBullet 只用于显示与键盘交互，不参与动力学计算。动力学由仿真后端承担：后端实现
+`gimbal_env.Environment` 的 reset / step / close 接口，默认是 100 Hz（dt = 0.01 s）的
+GimbalEnv；换成真实世界控制时实现同一个接口并在创建 Viewer 时传入即可，控制器与界面不需要
+改动。控制器只读取观测字典并输出四维力矩，三种模式共用同一个 100 Hz 循环。
 
 键盘：
-  1 / 2   关节 1  +1 / -1 N·m
-  3 / 4   关节 2  +1 / -1 N·m
-  5 / 6   关节 3  +1 / -1 N·m
-  7 / 8   关节 4  +1 / -1 N·m
+  1 / 2   关节 1  +1 / -1 N·m（力矩模式）或目标位置 +/−（PID 与策略模式）
+  3 / 4   关节 2  同上
+  5 / 6   关节 3  同上
+  7 / 8   关节 4  同上
+  m       在直接力矩、PID 目标位置、策略网络目标位置三种模式间切换
   r       回到零位
   q/ESC   退出
 
-用法：
-  python ui.py                 # GUI
-  python ui.py --direct --steps 100   # 无界面自检
+策略模式使用训练好的循环残差 SAC 控制器（默认 data/rl_final.pt）：目标位置与 PID 模式同样由
+按键以固定速度移动，策略模式下大 yaw 的目标位置不限幅，其余三轴的目标位置限制在硬限位内侧
+0.07 rad（与控制器内部的目标裁剪一致）。控制器维护最近 0.2 s 的目标位置缓冲，用其斜率外推未来
+0.2 s 的预瞄参考，按训练时的 142 维观测布局输出归一化动作，再乘以标称电机力矩系数得到力矩。
 
-依赖：pybullet、本仓库的 python 目录（gimbal_dynamics.py、params.py）。
+用法：
+  python ui.py                        # GUI
+  python ui.py --mode rl              # 启动即进入策略模式
+  python ui.py --direct --steps 100 --mode rl --torque 1   # 无界面自检
+
+依赖：pybullet、torch（仅策略模式）、本仓库的 python 目录。
 """
 
 from __future__ import annotations
@@ -24,28 +33,24 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import argparse
 import math
-import sys
 import time
 
 import numpy as np
+import pybullet as p
 
-try:
-    import pybullet as p
-except ImportError as error:
-    raise SystemExit("需要 pybullet：pip install pybullet") from error
-
-import gimbal_dynamics as gd
 import params
+from backend import make_simulation_env
+from controllers import PidController, RlController, TorqueController
 
-STEP = 0.004          # 每个主步的时长
-REFINEMENT = 2       # 每个主步内的 RK4 子步数
-STEPS_PER_FRAME = 4  # 每渲染帧推进的主步数，约 62.5 Hz
-FRAME_DT = STEP * STEPS_PER_FRAME
+DEFAULT_POLICY = Path(__file__).resolve().parents[2] / "data" / "rl_final.pt"
+STEP = 0.01  # 仿真步长（100 Hz），与仿真后端一致
+FRAME_DT = STEP
 
-KEY_TORQUE = {
+KEY_JOINT = {
     ord("1"): (0, +1.0),
     ord("2"): (0, -1.0),
     ord("3"): (1, +1.0),
@@ -101,33 +106,8 @@ def quaternion_from_matrix(matrix: np.ndarray) -> list[float]:
     return [x, y, z, w]
 
 
-class PidController:
-    def __init__(self) -> None:
-        self.integral = [0.0, 0.0, 0.0, 0.0]
-
-    def reset(self) -> None:
-        self.integral = [0.0, 0.0, 0.0, 0.0]
-
-    def torque(self, angles: list[float], velocities: list[float],
-               target: list[float], dt: float) -> list[float]:
-        command = [0.0, 0.0, 0.0, 0.0]
-        for i in range(4):
-            error = target[i] - angles[i]
-            self.integral[i] = max(
-                -params.PID_INTEGRAL_LIMIT,
-                min(params.PID_INTEGRAL_LIMIT, self.integral[i] + error * dt),
-            )
-            value = (
-                params.PID_KP[i] * error
-                + params.PID_KI[i] * self.integral[i]
-                - params.PID_KD[i] * velocities[i]
-            )
-            command[i] = max(-params.PID_TORQUE_LIMIT, min(params.PID_TORQUE_LIMIT, value))
-        return command
-
-
-def link_poses(angles: list[float]):
-    q1, q2, q3, q4 = angles
+def link_poses(angle):
+    q1, q2, q3, q4 = angle
     r1 = rot_z(q1)
     r2 = r1 @ rot_y(q2)
     r3 = r2 @ rot_z(q3)
@@ -143,7 +123,7 @@ def link_poses(angles: list[float]):
     return [(p1, r1), (p2, r2), (p3, r3), (p4, r4)]
 
 
-def create_visual_body(shape_id: int, position, color, mass: float = 0.0) -> int:
+def create_visual_body(shape_id, position, color, mass: float = 0.0) -> int:
     visual = p.createVisualShape(
         shapeType=p.GEOM_BOX,
         halfExtents=shape_id,
@@ -159,7 +139,10 @@ def create_visual_body(shape_id: int, position, color, mass: float = 0.0) -> int
 
 class Viewer:
     def __init__(self, direct: bool = False, mode: str = "torque",
-                 target_rate: float | None = None):
+                 target_rate: float | None = None,
+                 policy_path: str | None = None, environment=None):
+        if mode not in ("torque", "pid", "rl"):
+            raise ValueError("未知模式 %s" % mode)
         self.direct = direct
         if direct:
             self.client = p.connect(p.DIRECT)
@@ -188,35 +171,40 @@ class Viewer:
             create_visual_body([0.05, 0.05, 0.07], [0, 0.09, 0.20], [0.90, 0.55, 0.15, 1.0]),
             create_visual_body([0.05, 0.12, 0.04], [0, 0.09, 0.36], [0.85, 0.25, 0.25, 1.0]),
         ]
-        self.base_body = create_visual_body([0.10, 0.10, 0.04], [0, 0, 0], [0.35, 0.35, 0.35, 1.0])
+        self.base_body = create_visual_body([0.10, 0.10, 0.04], [0, 0, 0],
+                                            [0.35, 0.35, 0.35, 1.0])
         self.axis_ids = [-1, -1, -1, -1]
 
-        self.model = gd.make_model()
-        self.terrain = gd.make_terrain()
-        self.base = gd.make_base()
-        self.state = gd.make_state()
-        self.context = gd.Context(1)
+        self.env = make_simulation_env() if environment is None else environment
         self.pressed: set[int] = set()
         self.mode = mode
         self.target_rate = params.PID_TARGET_RATE if target_rate is None else target_rate
-        self.target = [0.0, 0.0, 0.0, 0.0]
-        self.pid = PidController()
+        self.policy_path = Path(policy_path) if policy_path else DEFAULT_POLICY
+        self.controllers = {}
+        self.observation = None
         self.mode_text_id = -1
         self.reset()
 
+    def controller(self):
+        if self.mode not in self.controllers:
+            if self.mode == "torque":
+                self.controllers["torque"] = TorqueController()
+            elif self.mode == "pid":
+                self.controllers["pid"] = PidController(self.target_rate)
+            else:
+                self.controllers["rl"] = RlController(self.target_rate, self.policy_path)
+        return self.controllers[self.mode]
+
     def reset(self) -> None:
-        self.state = gd.make_state()
         self.pressed.clear()
-        self.target = [0.0, 0.0, 0.0, 0.0]
-        self.pid.reset()
+        self.observation = self.env.reset({"angle": [0.0] * 4, "velocity": [0.0] * 4})
+        current = self.controller()
+        for controller in self.controllers.values():
+            controller.reset(self.observation)
         self.update_visuals()
 
-    def torque_command(self) -> list[float]:
-        command = [0.0, 0.0, 0.0, 0.0]
-        for key in self.pressed:
-            joint, sign = KEY_TORQUE[key]
-            command[joint] += sign
-        return [max(-1.0, min(1.0, value)) for value in command]
+    def inputs(self) -> list[tuple[int, float]]:
+        return [KEY_JOINT[key] for key in self.pressed]
 
     def handle_keyboard(self) -> bool:
         for key, event in p.getKeyboardEvents().items():
@@ -227,70 +215,25 @@ class Viewer:
                 continue
             if key == ord("m") and (event & p.KEY_WAS_TRIGGERED):
                 self.pressed.clear()
-                self.mode = "pid" if self.mode == "torque" else "torque"
-                if self.mode == "pid":
-                    self.target = [self.state.angle[i] for i in range(4)]
-                    self.pid.reset()
+                modes = ("torque", "pid", "rl")
+                self.mode = modes[(modes.index(self.mode) + 1) % len(modes)]
+                self.controller().reset(self.observation)
                 continue
-            if key in KEY_TORQUE:
+            if key in KEY_JOINT:
                 if event & p.KEY_WAS_RELEASED:
                     self.pressed.discard(key)
                 elif event & (p.KEY_IS_DOWN | p.KEY_WAS_TRIGGERED):
                     self.pressed.add(key)
         return True
 
-    def update_targets(self, dt: float) -> None:
-        for key in self.pressed:
-            joint, sign = KEY_TORQUE[key]
-            value = self.target[joint] + sign * self.target_rate * dt
-            self.target[joint] = max(
-                -params.PID_TARGET_LIMIT,
-                min(params.PID_TARGET_LIMIT, value),
-            )
-
-    def pid_torque(self, dt: float) -> list[float]:
-        angles = [self.state.angle[i] for i in range(4)]
-        velocities = [self.state.velocity[i] for i in range(4)]
-        feedback = self.pid.torque(angles, velocities, self.target, dt)
-        gravity = self.context.bias_torque(
-            self.model, self.terrain, self.base, self.state
-        )
-        return [
-            max(-params.PID_TORQUE_LIMIT, min(params.PID_TORQUE_LIMIT, feedback[i] + gravity[i]))
-            for i in range(4)
-        ]
-
     def advance(self) -> None:
-        if self.mode == "torque":
-            torque = self.torque_command()
-            torques = [torque for _ in range(STEPS_PER_FRAME)]
-            self.state = self.context.forward_simulate(
-                self.model,
-                self.terrain,
-                self.base,
-                self.state,
-                torques,
-                step=STEP,
-                refinement=REFINEMENT,
-            )
-        else:
-            for _ in range(STEPS_PER_FRAME):
-                self.update_targets(STEP)
-                torque = self.pid_torque(STEP)
-                self.state = self.context.forward_step(
-                    self.model,
-                    self.terrain,
-                    self.base,
-                    self.state,
-                    torque,
-                    step=STEP,
-                    refinement=REFINEMENT,
-                )
+        controller = self.controller()
+        torque = controller.command(self.observation, self.inputs(), STEP)
+        self.observation = self.env.step({"torque": torque})
         self.update_visuals()
 
     def update_visuals(self) -> None:
-        angles = [self.state.angle[i] for i in range(4)]
-        velocities = [self.state.velocity[i] for i in range(4)]
+        angles = [float(value) for value in self.observation["angle"]]
         poses = link_poses(angles)
         for body, (position, rotation) in zip(self.bodies, poses):
             p.resetBasePositionAndOrientation(
@@ -314,13 +257,16 @@ class Viewer:
                 lineWidth=2.0,
                 replaceItemUniqueId=self.axis_ids[joint],
             )
-        if self.mode == "pid":
-            text = "mode: PID target"
-            for i in range(4):
-                text += f"  T{i + 1}={self.target[i]:+.2f}"
-                text += f" Q{i + 1}={angles[i]:+.2f}"
-        else:
-            text = "mode: direct torque"
+        controller = self.controllers.get(self.mode)
+        label = {"torque": "direct torque", "pid": "PID target", "rl": "RL target"}[self.mode]
+        text = "mode: " + label
+        for joint in range(4):
+            if getattr(controller, "target", None) is not None:
+                text += f"  T{joint + 1}={controller.target[joint]:+.2f}"
+            text += f"  Q{joint + 1}={angles[joint]:+.2f}"
+        load = getattr(controller, "load_estimate", None)
+        if load is not None:
+            text += "  L=" + "/".join(f"{value:+.2f}" for value in load)
         self.mode_text_id = p.addUserDebugText(
             text,
             [0.0, 0.0, 0.62],
@@ -337,10 +283,10 @@ class Viewer:
         p.stepSimulation()
 
     def close(self) -> None:
-        try:
-            self.context.close()
-        finally:
-            p.disconnect(self.client)
+        for controller in self.controllers.values():
+            controller.close()
+        self.env.close()
+        p.disconnect(self.client)
 
 
 def main() -> int:
@@ -348,15 +294,17 @@ def main() -> int:
     parser.add_argument("--direct", action="store_true", help="无界面模式，用于自检")
     parser.add_argument("--steps", type=int, default=0, help="无界面模式下推进的帧数")
     parser.add_argument("--torque", type=float, default=0.0,
-                        help="无界面模式下恒定的力矩（力矩模式）或目标移动方向（PID 模式）")
-    parser.add_argument("--mode", choices=("torque", "pid"), default="torque",
-                        help="初始模式：直接力矩或 PID 目标位置")
+                        help="无界面模式下按住的方向键（力矩模式给力矩，目标模式移动目标）")
+    parser.add_argument("--mode", choices=("torque", "pid", "rl"), default="torque",
+                        help="初始模式：直接力矩、PID 目标位置或策略网络目标位置")
     parser.add_argument("--target-rate", type=float, default=None,
-                        help="PID 模式下按住按键时目标位置速度，rad/s")
+                        help="PID 与策略模式下按住按键时目标位置速度，rad/s")
+    parser.add_argument("--policy", default=None,
+                        help="策略模式使用的检查点路径，默认 data/rl_final.pt")
     arguments = parser.parse_args()
 
     viewer = Viewer(direct=arguments.direct, mode=arguments.mode,
-                    target_rate=arguments.target_rate)
+                    target_rate=arguments.target_rate, policy_path=arguments.policy)
     try:
         if arguments.direct:
             steps = arguments.steps if arguments.steps > 0 else 60
@@ -364,14 +312,18 @@ def main() -> int:
                 viewer.pressed = {ord("1") if arguments.torque > 0 else ord("2")}
             for _ in range(steps):
                 viewer.step()
-            angles, velocities = gd.state_to_lists(viewer.state)
+            angles = viewer.observation["angle"]
+            velocities = viewer.observation["velocity"]
             print("mode:", viewer.mode)
-            print("angles:", [round(value, 6) for value in angles])
-            print("velocities:", [round(value, 6) for value in velocities])
-            print("targets:", [round(value, 6) for value in viewer.target])
+            print("angles:", [round(float(value), 6) for value in angles])
+            print("velocities:", [round(float(value), 6) for value in velocities])
+            target = getattr(viewer.controllers[viewer.mode], "target", None)
+            if target is not None:
+                print("target:", [round(float(value), 6) for value in target])
             return 0
         print("键盘：1/2 关节1，3/4 关节2，5/6 关节3，7/8 关节4；"
-              "力矩模式输出 ±1 N·m，PID 模式移动目标位置；m 切换模式；r 复位；q/ESC 退出")
+              "力矩模式输出 ±1 N·m，PID 与策略模式移动目标位置；"
+              "m 循环切换 力矩/PID/策略 模式；r 复位；q/ESC 退出")
         next_frame = time.perf_counter()
         while True:
             viewer.step()
