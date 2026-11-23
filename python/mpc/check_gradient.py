@@ -1,7 +1,7 @@
 """控制量梯度的中心差分校验。
 
-覆盖终端跟踪、软限位二次铰链、力矩变化率（含 previous_torque）与逐步跟踪全部激活的
-情形：先用 tcrg_forward_step 逐步重建轨迹，在 Python 里按 C 接口的损失定义算出参考损失，
+覆盖软限位二次铰链、力矩变化率（含 previous_torque）与逐步跟踪全部激活的情形：
+先用 tcrg_forward_step 逐步重建轨迹，在 Python 里按 C 接口的损失定义算出参考损失，
 确认损失构成与字段映射正确；再对每个力矩分量做中心差分，与 tcrg_control_gradient
 返回的解析梯度比较，要求双精度相对偏差小于 1e-6。
 """
@@ -48,8 +48,6 @@ def build_case():
         "velocity_weights": np.array([0.3, 0.2, 0.5, 0.4]),
         "torque_weights": np.array([0.01, 0.02, 0.03, 0.04]),
         "torque_rate_weights": np.array([0.5, 0.4, 0.3, 0.2]),
-        "terminal_angle_weights": np.array([30.0, 20.0, 40.0, 50.0]),
-        "terminal_velocity_weights": np.array([5.0, 4.0, 3.0, 2.0]),
         "limit_weights": np.array([0.0, 800.0, 600.0, 900.0]),
         "limit_lower": np.array([-np.inf, -math.radians(45.0),
                                  -math.radians(50.0), -math.radians(45.0)]),
@@ -104,12 +102,6 @@ def reference_loss(states, case) -> float:
                       * hinge(angle[j], weights["limit_lower"][j],
                              weights["limit_upper"][j],
                              weights["limit_margin"][j]) ** 2)
-    final = states[-1]
-    for j in range(4):
-        angle_error = final.angle[j] - case["target_angle"][-1, j]
-        velocity_error = final.velocity[j] - case["target_velocity"][-1, j]
-        total += (weights["terminal_angle_weights"][j] * angle_error ** 2
-                  + weights["terminal_velocity_weights"][j] * velocity_error ** 2)
     return total / count
 
 
@@ -118,8 +110,7 @@ def term_values(states, case) -> dict:
     torques = case["torques"]
     weights = case["weights"]
     count = len(torques)
-    terms = {"tracking": 0.0, "torque": 0.0, "rate": 0.0, "limit": 0.0,
-             "terminal": 0.0}
+    terms = {"tracking": 0.0, "torque": 0.0, "rate": 0.0, "limit": 0.0}
     for k in range(count):
         angle = np.array([states[k].angle[i] for i in range(4)])
         velocity = np.array([states[k].velocity[i] for i in range(4)])
@@ -137,13 +128,6 @@ def term_values(states, case) -> dict:
                                * hinge(angle[j], weights["limit_lower"][j],
                                       weights["limit_upper"][j],
                                       weights["limit_margin"][j]) ** 2)
-    final = states[-1]
-    for j in range(4):
-        terms["terminal"] += (
-            weights["terminal_angle_weights"][j]
-            * (final.angle[j] - case["target_angle"][-1, j]) ** 2
-            + weights["terminal_velocity_weights"][j]
-            * (final.velocity[j] - case["target_velocity"][-1, j]) ** 2)
     return {name: value / count for name, value in terms.items()}
 
 

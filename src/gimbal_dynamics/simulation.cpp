@@ -74,25 +74,12 @@ Real step_loss(const LossSpec& loss, std::size_t num_steps, std::size_t step,
             total += loss.torque_rate_weights[i] * torque_rate * torque_rate;
         }
     }
-    if (step + 1 == num_steps) {
-        for (int i = 0; i < 4; ++i) {
-            const Real angle_target =
-                (loss.target_angle != nullptr) ? loss.target_angle[step][i] : 0.0;
-            const Real velocity_target =
-                (loss.target_velocity != nullptr) ? loss.target_velocity[step][i] : 0.0;
-            const Real angle_error = state.angle[i] - angle_target;
-            const Real velocity_error = state.velocity[i] - velocity_target;
-            total += loss.terminal_angle_weights[i] * angle_error * angle_error +
-                     loss.terminal_velocity_weights[i] * velocity_error * velocity_error;
-        }
-    }
     return scale * total;
 }
 
 math::Vector8d step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
                                   std::size_t step, const State& state) {
     const Real scale = 2.0 / static_cast<Real>(num_steps);
-    const bool terminal = (step + 1 == num_steps);
     math::Vector8d gradient;
     for (int i = 0; i < 4; ++i) {
         const Real angle_target =
@@ -103,12 +90,9 @@ math::Vector8d step_loss_gradient(const LossSpec& loss, std::size_t num_steps,
         const Real velocity_error = state.velocity[i] - velocity_target;
         const Real hinge = limit_hinge(state.angle[i], loss.limit_lower[i], loss.limit_upper[i],
                                        loss.limit_margin[i]);
-        Real angle_gradient = loss.angle_weights[i] * angle_error + loss.limit_weights[i] * hinge;
-        Real velocity_gradient = loss.velocity_weights[i] * velocity_error;
-        if (terminal) {
-            angle_gradient += loss.terminal_angle_weights[i] * angle_error;
-            velocity_gradient += loss.terminal_velocity_weights[i] * velocity_error;
-        }
+        const Real angle_gradient = loss.angle_weights[i] * angle_error +
+                                    loss.limit_weights[i] * hinge;
+        const Real velocity_gradient = loss.velocity_weights[i] * velocity_error;
         gradient[i] = scale * angle_gradient;
         gradient[4 + i] = scale * velocity_gradient;
     }

@@ -1,4 +1,4 @@
-"""ctypes 绑定：调用 C 接口中的动力学前向仿真。
+"""ctypes 绑定：调用 C 接口中的动力学前向仿真、梯度与 MPC 求解器。
 
 库文件按以下顺序查找：
   1. 环境变量 GIMBAL_DYNAMICS_LIB
@@ -68,10 +68,9 @@ class TcrgControlLoss(ctypes.Structure):
       L = 1/K Σ_k Σ_i [ wa_i (q_ki - q*_ki)^2 + wv_i (v_ki - v*_ki)^2
                         + wt_i τ_ki^2 + wr_i (τ_ki - τ_{k-1,i})^2
                         + wl_i hinge_i(q_ki)^2 ]
-          + 1/K Σ_i [ waT_i (q_Ki - q*_{K-1,i})^2 + wvT_i (v_Ki - v*_{K-1,i})^2 ]
     hinge_i(q) = q - (upper_i - margin_i)（q 高于上软限时），
                  (lower_i + margin_i) - q（q 低于下软限时），否则为 0。
-    τ_{-1,i} 取 previous_torque；previous_torque 为空指针时第 0 步跳过变化率项。
+    τ_{-1,i} 取 previous_torque（上一次采用的第一步力矩）；为空指针时第 0 步跳过变化率项。
     """
 
     _fields_ = [
@@ -79,8 +78,6 @@ class TcrgControlLoss(ctypes.Structure):
         ("velocity_weights", ctypes.c_double * 4),
         ("torque_weights", ctypes.c_double * 4),
         ("torque_rate_weights", ctypes.c_double * 4),
-        ("terminal_angle_weights", ctypes.c_double * 4),
-        ("terminal_velocity_weights", ctypes.c_double * 4),
         ("limit_weights", ctypes.c_double * 4),
         ("limit_lower", ctypes.c_double * 4),
         ("limit_upper", ctypes.c_double * 4),
@@ -88,6 +85,39 @@ class TcrgControlLoss(ctypes.Structure):
         ("target_angle", ctypes.POINTER(ctypes.c_double)),
         ("target_velocity", ctypes.POINTER(ctypes.c_double)),
         ("previous_torque", ctypes.POINTER(ctypes.c_double)),
+    ]
+
+
+class TcrgMpcConfig(ctypes.Structure):
+    """C++ MPC 求解器配置，字段顺序与 c_api.h 的 TcrgMpcConfig 一致。"""
+
+    _fields_ = [
+        ("horizon", ctypes.c_size_t),
+        ("step", ctypes.c_double),
+        ("refinement", ctypes.c_int),
+        ("torque_limit", ctypes.c_double),
+        ("max_iter", ctypes.c_int),
+        ("tolerance", ctypes.c_double),
+        ("angle_weights", ctypes.c_double * 4),
+        ("velocity_weights", ctypes.c_double * 4),
+        ("torque_weights", ctypes.c_double * 4),
+        ("torque_rate_weights", ctypes.c_double * 4),
+        ("limit_weights", ctypes.c_double * 4),
+        ("limit_lower", ctypes.c_double * 4),
+        ("limit_upper", ctypes.c_double * 4),
+        ("limit_margin", ctypes.c_double * 4),
+    ]
+
+
+class TcrgMpcInfo(ctypes.Structure):
+    """单次 MPC 求解信息，字段顺序与 c_api.h 的 TcrgMpcInfo 一致。"""
+
+    _fields_ = [
+        ("loss", ctypes.c_double),
+        ("iterations", ctypes.c_int),
+        ("evaluations", ctypes.c_int),
+        ("converged", ctypes.c_int),
+        ("projected_gradient", ctypes.c_double),
     ]
 
 
@@ -220,6 +250,38 @@ def _bind_control_gradient() -> None:
     ]
     function.restype = ctypes.c_int
     _control_gradient_bound = True
+
+
+_mpc_bound = False
+
+
+def _bind_mpc() -> None:
+    """首次使用时绑定 MPC 求解器接口；库未导出符号时直接抛出 AttributeError。"""
+    global _mpc_bound
+    if _mpc_bound:
+        return
+    _lib.tcrg_mpc_create.argtypes = [
+        ctypes.POINTER(TcrgModel),
+        ctypes.POINTER(TcrgMpcConfig),
+        ctypes.c_int,
+    ]
+    _lib.tcrg_mpc_create.restype = ctypes.c_void_p
+    _lib.tcrg_mpc_destroy.argtypes = [ctypes.c_void_p]
+    _lib.tcrg_mpc_destroy.restype = None
+    _lib.tcrg_mpc_reset.argtypes = [ctypes.c_void_p]
+    _lib.tcrg_mpc_reset.restype = None
+    _lib.tcrg_mpc_solve.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(TcrgTerrain),
+        ctypes.POINTER(TcrgBaseState),
+        ctypes.POINTER(TcrgState),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(TcrgMpcInfo),
+    ]
+    _lib.tcrg_mpc_solve.restype = ctypes.c_int
+    _mpc_bound = True
 
 
 def _weights(values, name: str, default: float = 0.0) -> List[float]:
@@ -500,8 +562,6 @@ class Context:
         velocity_weights: Sequence[float] | None = None,
         torque_weights: Sequence[float] | None = None,
         torque_rate_weights: Sequence[float] | None = None,
-        terminal_angle_weights: Sequence[float] | None = None,
-        terminal_velocity_weights: Sequence[float] | None = None,
         limit_weights: Sequence[float] | None = None,
         limit_lower: Sequence[float] | None = None,
         limit_upper: Sequence[float] | None = None,
@@ -513,8 +573,9 @@ class Context:
         """一次调用同时返回轨迹损失、损失对控制量的梯度与末端状态。
 
         torques 形状为 (num_steps, 4)；target_angle/target_velocity 形状为 (num_steps, 4)，
-        为空表示该组跟踪项不参与；base 为单个 TcrgBaseState（广播到整个预测区间）
-        或长度为 num_steps 的序列；previous_torque 为上一拍实际施加的力矩。
+        为空表示对应目标取 0（权重非零时即零目标正则化）；base 为单个 TcrgBaseState
+        （广播到整个预测区间）或长度为 num_steps 的序列；previous_torque 为上一拍实际
+        施加的第一步力矩，τ_0 与它的差距计入变化率项。
         返回 (loss, gradient[num_steps, 4], final_state)。
         """
         _bind_control_gradient()
@@ -548,8 +609,6 @@ class Context:
             ("velocity_weights", velocity_weights),
             ("torque_weights", torque_weights),
             ("torque_rate_weights", torque_rate_weights),
-            ("terminal_angle_weights", terminal_angle_weights),
-            ("terminal_velocity_weights", terminal_velocity_weights),
             ("limit_weights", limit_weights),
         )
         for name, values in weight_fields:
@@ -598,6 +657,112 @@ class Context:
             raise _error()
         gradient = np.ctypeslib.as_array(gradient_array).copy().reshape(count, 4)
         return loss_value.value, gradient, final_state
+
+
+class MpcSolver:
+    """C++ 端滚动时域 MPC 求解器的 Python 包装。
+
+    每个控制拍调用 tcrg_mpc_solve：输入当前状态、地形、底盘状态与未来 horizon 步目标角度，
+    C++ 内部完成代价组装、反向伴随梯度、投影 L-BFGS 与箱约束，返回本拍力矩。热启动解与
+    上一拍实际力矩由求解器内部维护，reset() 清除。角速度目标可以为空，为空时目标取零。
+    """
+
+    def __init__(self, model: TcrgModel, horizon: int = 20, step: float = 0.01,
+                 refinement: int = 2, torque_limit: float = 8.0, max_iter: int = 30,
+                 tolerance: float = 1e-4, weights: dict | None = None,
+                 thread_count: int = 4):
+        self.model = model
+        self.horizon = int(horizon)
+        self.torque_limit = float(torque_limit)
+        config = TcrgMpcConfig()
+        config.horizon = self.horizon
+        config.step = float(step)
+        config.refinement = int(refinement)
+        config.torque_limit = self.torque_limit
+        config.max_iter = int(max_iter)
+        config.tolerance = float(tolerance)
+        weights = {} if weights is None else dict(weights)
+        for name in ("angle_weights", "velocity_weights", "torque_weights",
+                     "torque_rate_weights", "limit_weights"):
+            field = getattr(config, name)
+            for joint, value in enumerate(_weights(weights.get(name), name)):
+                field[joint] = value
+        for joint, value in enumerate(_weights(weights.get("limit_lower"), "limit_lower",
+                                               float("-inf"))):
+            config.limit_lower[joint] = value
+        for joint, value in enumerate(_weights(weights.get("limit_upper"), "limit_upper",
+                                               float("inf"))):
+            config.limit_upper[joint] = value
+        for joint, value in enumerate(_weights(weights.get("limit_margin"), "limit_margin")):
+            config.limit_margin[joint] = value
+        _bind_mpc()
+        self._solver = _lib.tcrg_mpc_create(ctypes.byref(model), ctypes.byref(config),
+                                            ctypes.c_int(int(thread_count)))
+        if not self._solver:
+            raise _error()
+
+    def reset(self) -> None:
+        """清空热启动解与上一拍力矩，供回合切换使用。"""
+        _lib.tcrg_mpc_reset(self._solver)
+
+    def solve(self, initial: TcrgState, terrain: TcrgTerrain, base: TcrgBaseState,
+              target_angle: Sequence[Sequence[float]],
+              target_velocity: Sequence[Sequence[float]] | None = None):
+        """求解本拍，返回 (力矩[4], 求解信息字典)。
+
+        target_angle 形状为 (horizon, 4)，第 k 行为预测第 k+1 拍的目标；
+        target_velocity 可以为空，为空时角速度目标取零。
+        """
+        targets = np.asarray(target_angle, dtype=float)
+        if targets.shape != (self.horizon, 4):
+            raise ValueError(f"target_angle 形状必须为 ({self.horizon}, 4)")
+        target_array = (ctypes.c_double * (self.horizon * 4))(*targets.reshape(-1).tolist())
+        velocity_array = None
+        if target_velocity is not None:
+            velocities = np.asarray(target_velocity, dtype=float)
+            if velocities.shape != (self.horizon, 4):
+                raise ValueError(f"target_velocity 形状必须为 ({self.horizon}, 4)")
+            velocity_array = (ctypes.c_double * (self.horizon * 4))(
+                *velocities.reshape(-1).tolist())
+        torque = (ctypes.c_double * 4)()
+        info = TcrgMpcInfo()
+        result = _lib.tcrg_mpc_solve(
+            self._solver,
+            ctypes.byref(terrain),
+            ctypes.byref(base),
+            ctypes.byref(initial),
+            target_array,
+            velocity_array,
+            torque,
+            ctypes.byref(info),
+        )
+        if result != 0:
+            raise _error()
+        info_dict = {
+            "loss": float(info.loss),
+            "iterations": int(info.iterations),
+            "evaluations": int(info.evaluations),
+            "converged": bool(info.converged),
+            "projected_gradient": float(info.projected_gradient),
+        }
+        return np.array([torque[i] for i in range(4)], dtype=float), info_dict
+
+    def close(self) -> None:
+        if getattr(self, "_solver", None):
+            _lib.tcrg_mpc_destroy(self._solver)
+            self._solver = None
+
+    def __enter__(self) -> "MpcSolver":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def state_to_lists(state: TcrgState) -> tuple[List[float], List[float]]:

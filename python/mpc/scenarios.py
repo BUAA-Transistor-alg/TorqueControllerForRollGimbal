@@ -93,7 +93,10 @@ def mismatch_raw() -> np.ndarray:
 
 def generate_reference(rng: np.random.Generator, steps: int,
                        difficulty: float = 1.0):
-    """多正弦加随机阶跃与 yaw 漂移的参考轨迹，允许超出关节限位。"""
+    """多正弦加随机阶跃与 yaw 漂移的参考角度轨迹，允许超出关节限位。
+
+    只生成目标角度；控制器不使用参考角速度，角速度项作为零目标的正则化。
+    """
     time = np.arange(steps) * DT
     angle = np.zeros((steps, 4))
     for joint in range(4):
@@ -119,9 +122,7 @@ def generate_reference(rng: np.random.Generator, steps: int,
             signal = np.clip(signal, LOWER[joint] - OUT_OF_RANGE_MARGIN,
                              UPPER[joint] + OUT_OF_RANGE_MARGIN)
         angle[:, joint] = signal
-    velocity = np.clip(np.gradient(angle, DT, axis=0), -3.0, 3.0)
-    acceleration = np.gradient(velocity, DT, axis=0)
-    return angle, velocity, acceleration
+    return angle
 
 
 class Scenario:
@@ -131,8 +132,7 @@ class Scenario:
         self.seed = int(seed)
         self.steps = int(steps)
         rng = np.random.default_rng(self.seed)
-        self.reference_angle, self.reference_velocity, self.reference_acceleration = (
-            generate_reference(rng, self.steps, difficulty))
+        self.reference_angle = generate_reference(rng, self.steps, difficulty)
         self.slope = float(rng.uniform(0.05, 0.17))
         self.direction = float(rng.uniform(0.0, 2.0 * math.pi))
         self.terrain = gd.make_terrain(self.slope, self.direction)
@@ -159,7 +159,7 @@ class Scenario:
                                      LOWER[joint] + 2.0 * LIMIT_MARGIN,
                                      UPPER[joint] - 2.0 * LIMIT_MARGIN)
         self.initial_angle = initial
-        self.initial_velocity = self.reference_velocity[0].copy()
+        self.initial_velocity = np.zeros(4)
 
     def base_state(self, index: int) -> gd.TcrgBaseState:
         """第 index 拍起始时刻的真实底盘状态。"""
@@ -178,9 +178,9 @@ class Scenario:
                             yaw_acceleration=yaw_acceleration)
 
     def window(self, index: int, horizon: int):
-        """从下一拍开始的 horizon 个参考点，末尾不足处取最后一个点。"""
+        """从下一拍开始的 horizon 个参考角度，末尾不足处取最后一个点。"""
         indices = np.clip(index + np.arange(1, horizon + 1), 0, self.steps - 1)
-        return self.reference_angle[indices], self.reference_velocity[indices]
+        return self.reference_angle[indices]
 
     def measure(self, angle: np.ndarray, velocity: np.ndarray, index: int,
                 rng: np.random.Generator) -> dict:
@@ -221,21 +221,21 @@ def run_closed_loop(scenario: Scenario, controller, plant_model: gd.TcrgModel,
     hit_history = np.zeros(steps, dtype=bool)
     solve_time = np.zeros(steps)
     iterations = np.zeros(steps, dtype=int)
-    calls = np.zeros(steps, dtype=int)
+    evaluations = np.zeros(steps, dtype=int)
     for index in range(steps):
         angle = np.array([state.angle[i] for i in range(4)])
         velocity = np.array([state.velocity[i] for i in range(4)])
         measured = scenario.measure(angle, velocity, index, rng)
-        target_angle, target_velocity = scenario.window(index, horizon)
+        target_angle = scenario.window(index, horizon)
         command = np.asarray(controller.command(
-            measured["angle"], measured["velocity"], target_angle, target_velocity,
+            measured["angle"], measured["velocity"], target_angle,
             measured["terrain"], measured["base"]), dtype=float)
         command = np.clip(command, -torque_limit, torque_limit)
         command_history[index] = command
         info = getattr(controller, "last_info", {})
         solve_time[index] = float(info.get("solve_time", 0.0))
         iterations[index] = int(info.get("iterations", 0))
-        calls[index] = int(info.get("calls", 0))
+        evaluations[index] = int(info.get("evaluations", 0))
         state = context.forward_step(plant_model, scenario.terrain,
                                      scenario.base_state(index), state, command,
                                      DT, REFINEMENT)
@@ -260,6 +260,6 @@ def run_closed_loop(scenario: Scenario, controller, plant_model: gd.TcrgModel,
         velocity_history[index + 1] = next_velocity
     return {"angle": angle_history, "velocity": velocity_history,
             "reference": scenario.reference_angle,
-            "reference_velocity": scenario.reference_velocity,
             "command": command_history, "hits": hit_history,
-            "solve_time": solve_time, "iterations": iterations, "calls": calls}
+            "solve_time": solve_time, "iterations": iterations,
+            "evaluations": evaluations}

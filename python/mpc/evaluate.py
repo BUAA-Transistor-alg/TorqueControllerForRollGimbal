@@ -32,7 +32,7 @@ LINE_STYLES = {"PID": "-", "MPC (design)": "--", "MPC (identified)": "-."}
 
 
 class PidController:
-    """params.py 增益加 bias_torque 前馈的 PID，输出限幅与 MPC 一致。"""
+    """params.py 增益加 bias_torque 前馈的 PID，微分作用在测量角速度上，输出限幅与 MPC 一致。"""
 
     horizon = 1
 
@@ -49,7 +49,7 @@ class PidController:
         self.integral = np.zeros(4)
         self.last_info = {"solve_time": 0.0, "iterations": 0}
 
-    def command(self, angle, velocity, target_angle, target_velocity,
+    def command(self, angle, velocity, target_angle,
                 terrain: gd.TcrgTerrain, base: gd.TcrgBaseState) -> np.ndarray:
         started = time.perf_counter()
         angle = np.asarray(angle, dtype=float)
@@ -61,7 +61,7 @@ class PidController:
         feedforward = np.asarray(self.context.bias_torque(
             self.model, terrain, base, state))
         output = (feedforward + self.kp * error + self.ki * self.integral
-                  + self.kd * (np.asarray(target_velocity[0], dtype=float) - velocity))
+                  - self.kd * velocity)
         output = np.clip(output, -self.torque_limit, self.torque_limit)
         self.last_info = {"solve_time": time.perf_counter() - started,
                           "iterations": 0}
@@ -94,7 +94,7 @@ def compute_metrics(records: dict, scenario: scenarios.Scenario) -> dict:
         "solve_ms": float(1000.0 * np.mean(records["solve_time"])),
         "solve_ms_max": float(1000.0 * np.max(records["solve_time"])),
         "iterations": float(np.mean(records["iterations"])),
-        "calls": float(np.mean(records["calls"])),
+        "evaluations": float(np.mean(records["evaluations"])),
     }
 
 
@@ -102,7 +102,7 @@ def print_table(metrics: dict) -> None:
     header = ("%-18s %9s %9s %9s %9s %9s %11s %8s %11s %9s %11s %7s"
               % ("controller", "RMSE j1", "RMSE j2", "RMSE j3", "RMSE j4",
                  "RMSE mean", "max err", "hits", "tau mean sq", "|tau|max",
-                 "solve ms", "calls"))
+                 "solve ms", "evals"))
     print(header)
     print("-" * len(header))
     for name, values in metrics.items():
@@ -110,13 +110,13 @@ def print_table(metrics: dict) -> None:
               % (name, values["rmse"][0], values["rmse"][1], values["rmse"][2],
                  values["rmse"][3], values["mean_rmse"], values["max_error"],
                  values["hit_steps"], values["torque_square"], values["torque_max"],
-                 values["solve_ms"], values["calls"]))
+                 values["solve_ms"], values["evaluations"]))
     print("限位内 RMSE 只统计参考落在该关节硬限位内的时刻；hits 为至少一个关节撞挡块的步数")
     for name, values in metrics.items():
         if name.startswith("MPC"):
-            print("%s 求解时间: 平均 %.2f ms 最大 %.2f ms，平均迭代 %.1f 次，每拍 C 接口调用 %.1f 次"
+            print("%s 求解时间: 平均 %.2f ms 最大 %.2f ms，平均迭代 %.1f 次，每拍代价求值 %.1f 次"
                   % (name, values["solve_ms"], values["solve_ms_max"],
-                     values["iterations"], values["calls"]))
+                     values["iterations"], values["evaluations"]))
 
 
 def plot_tracking(scenario, runs, output: Path) -> None:
@@ -238,20 +238,22 @@ def main() -> None:
     print("被控对象: " + plant_name)
     runs = {}
     metrics = {}
-    # 多线程上下文只并行阶段 Jacobian 的计算，前向积分与反向伴随仍在调用线程，
-    # 因此控制结果与串行一致，差异只体现在单步求解时间上。
+    # 前向仿真与 MPC 求解共享同一线程数；MPC 求解器在 C++ 内部并行阶段 Jacobian，
+    # 控制结果与线程数无关。
     with gd.Context(arguments.threads) as context:
         controllers = {
             "PID": PidController(context, scenarios.design_model(),
                                  torque_limit=arguments.torque_limit),
-            "MPC (design)": MpcController(context, scenarios.design_model(),
+            "MPC (design)": MpcController(scenarios.design_model(),
                                           horizon=arguments.horizon,
                                           torque_limit=arguments.torque_limit,
-                                          max_iter=arguments.max_iter),
-            "MPC (identified)": MpcController(context, scenarios.identified_model(),
+                                          max_iter=arguments.max_iter,
+                                          thread_count=arguments.threads),
+            "MPC (identified)": MpcController(scenarios.identified_model(),
                                               horizon=arguments.horizon,
                                               torque_limit=arguments.torque_limit,
-                                              max_iter=arguments.max_iter),
+                                              max_iter=arguments.max_iter,
+                                              thread_count=arguments.threads),
         }
         for name, controller in controllers.items():
             started = time.perf_counter()

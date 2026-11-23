@@ -5,6 +5,7 @@
 
 #include "gimbal_dynamics/handlers.hpp"
 #include "gimbal_dynamics/model_evaluation.hpp"
+#include "gimbal_dynamics/mpc_solver.hpp"
 
 namespace {
 
@@ -80,6 +81,27 @@ bool valid(const TcrgModel* model, const TcrgTerrain* terrain, const TcrgBaseSta
            torque != nullptr;
 }
 
+tcrg::gimbal_dynamics::mpc::ConfigT<double> convert_mpc_config(const TcrgMpcConfig& source) {
+    tcrg::gimbal_dynamics::mpc::ConfigT<double> config;
+    config.horizon = source.horizon;
+    config.step = source.step;
+    config.refinement = source.refinement;
+    config.torque_limit = source.torque_limit;
+    config.max_iter = source.max_iter;
+    config.tolerance = source.tolerance;
+    for (int joint = 0; joint < 4; ++joint) {
+        config.loss.angle_weights[joint] = source.angle_weights[joint];
+        config.loss.velocity_weights[joint] = source.velocity_weights[joint];
+        config.loss.torque_weights[joint] = source.torque_weights[joint];
+        config.loss.torque_rate_weights[joint] = source.torque_rate_weights[joint];
+        config.loss.limit_weights[joint] = source.limit_weights[joint];
+        config.loss.limit_lower[joint] = source.limit_lower[joint];
+        config.loss.limit_upper[joint] = source.limit_upper[joint];
+        config.loss.limit_margin[joint] = source.limit_margin[joint];
+    }
+    return config;
+}
+
 }  // namespace
 
 struct TcrgContext {
@@ -88,6 +110,12 @@ struct TcrgContext {
     tcrg::gimbal_dynamics::ForwardSimulation<double> handler;
     tcrg::gimbal_dynamics::ParameterSensitivity<double> parameter_sensitivity;
     tcrg::gimbal_dynamics::ControlGradient<double> control_gradient;
+};
+
+struct TcrgMpc {
+    TcrgMpc(const TcrgModel& source, const TcrgMpcConfig& config, int threads)
+        : solver(threads, convert_model(source), convert_mpc_config(config)) {}
+    tcrg::gimbal_dynamics::mpc::SolverT<double> solver;
 };
 
 extern "C" {
@@ -377,8 +405,6 @@ int tcrg_control_gradient(const TcrgContext* context, const TcrgModel* model,
             input.loss.velocity_weights[i] = loss_spec->velocity_weights[i];
             input.loss.torque_weights[i] = loss_spec->torque_weights[i];
             input.loss.torque_rate_weights[i] = loss_spec->torque_rate_weights[i];
-            input.loss.terminal_angle_weights[i] = loss_spec->terminal_angle_weights[i];
-            input.loss.terminal_velocity_weights[i] = loss_spec->terminal_velocity_weights[i];
             input.loss.limit_weights[i] = loss_spec->limit_weights[i];
             input.loss.limit_lower[i] = loss_spec->limit_lower[i];
             input.loss.limit_upper[i] = loss_spec->limit_upper[i];
@@ -421,6 +447,77 @@ int tcrg_control_gradient(const TcrgContext* context, const TcrgModel* model,
             for (int i = 0; i < 4; ++i) {
                 gradient[k * 4 + static_cast<size_t>(i)] = output.gradient[k][i];
             }
+        }
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return 2;
+    }
+}
+
+TcrgMpc* tcrg_mpc_create(const TcrgModel* model, const TcrgMpcConfig* config,
+                         int thread_count) {
+    if (model == nullptr || config == nullptr) {
+        set_error("参数为空指针");
+        return nullptr;
+    }
+    try {
+        return new TcrgMpc(*model, *config, thread_count < 1 ? 1 : thread_count);
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return nullptr;
+    }
+}
+
+void tcrg_mpc_destroy(TcrgMpc* solver) { delete solver; }
+
+void tcrg_mpc_reset(TcrgMpc* solver) {
+    if (solver != nullptr) {
+        solver->solver.reset();
+    }
+}
+
+int tcrg_mpc_solve(TcrgMpc* solver, const TcrgTerrain* terrain, const TcrgBaseState* base,
+                   const TcrgState* initial, const double* target_angle,
+                   const double* target_velocity, double torque[4], TcrgMpcInfo* info) {
+    if (solver == nullptr || terrain == nullptr || base == nullptr || initial == nullptr ||
+        target_angle == nullptr || torque == nullptr) {
+        set_error("参数为空指针");
+        return 1;
+    }
+    try {
+        using namespace tcrg::gimbal_dynamics;
+        const std::size_t count = solver->solver.config().horizon;
+        std::vector<math::Vector<double, 4>> targets(count);
+        std::vector<math::Vector<double, 4>> velocities;
+        for (std::size_t k = 0; k < count; ++k) {
+            for (int i = 0; i < 4; ++i) {
+                targets[k][i] = target_angle[k * 4 + static_cast<std::size_t>(i)];
+            }
+        }
+        const math::Vector<double, 4>* velocity_targets = nullptr;
+        if (target_velocity != nullptr) {
+            velocities.resize(count);
+            for (std::size_t k = 0; k < count; ++k) {
+                for (int i = 0; i < 4; ++i) {
+                    velocities[k][i] = target_velocity[k * 4 + static_cast<std::size_t>(i)];
+                }
+            }
+            velocity_targets = velocities.data();
+        }
+        mpc::InfoT<double> result;
+        const math::Vector<double, 4> command = solver->solver.solve(
+            convert_state(*initial), convert_terrain(*terrain), convert_base(*base),
+            targets.data(), velocity_targets, &result);
+        for (int i = 0; i < 4; ++i) {
+            torque[i] = command[i];
+        }
+        if (info != nullptr) {
+            info->loss = result.loss;
+            info->iterations = result.iterations;
+            info->evaluations = result.evaluations;
+            info->converged = result.converged ? 1 : 0;
+            info->projected_gradient = result.projected_gradient;
         }
         return 0;
     } catch (const std::exception& error) {

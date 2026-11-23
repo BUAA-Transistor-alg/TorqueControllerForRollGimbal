@@ -69,8 +69,6 @@ std::vector<tcrg::gimbal_dynamics::simulation::LossSpec> build_batch_losses(
         losses[sample].velocity_weights = weights->velocity_weights;
         losses[sample].torque_weights = weights->torque_weights;
         losses[sample].torque_rate_weights = weights->torque_rate_weights;
-        losses[sample].terminal_angle_weights = weights->terminal_angle_weights;
-        losses[sample].terminal_velocity_weights = weights->terminal_velocity_weights;
         losses[sample].limit_weights = weights->limit_weights;
         losses[sample].limit_lower = weights->limit_lower;
         losses[sample].limit_upper = weights->limit_upper;

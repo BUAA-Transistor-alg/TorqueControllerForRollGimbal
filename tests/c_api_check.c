@@ -119,6 +119,83 @@ int main(void) {
             return 1;
         }
     }
+
+    TcrgMpcConfig mpc_config;
+    memset(&mpc_config, 0, sizeof(mpc_config));
+    mpc_config.horizon = 10;
+    mpc_config.step = 0.01;
+    mpc_config.refinement = 2;
+    mpc_config.torque_limit = 8.0;
+    mpc_config.max_iter = 20;
+    mpc_config.tolerance = 1e-3;
+    for (int i = 0; i < 4; ++i) {
+        mpc_config.angle_weights[i] = 1.0;
+        mpc_config.velocity_weights[i] = 0.001;
+        mpc_config.torque_weights[i] = 0.001;
+        mpc_config.torque_rate_weights[i] = 0.01;
+        mpc_config.limit_margin[i] = 0.07;
+        mpc_config.limit_lower[i] = -1e9;
+        mpc_config.limit_upper[i] = 1e9;
+    }
+    mpc_config.limit_weights[1] = 200.0;
+    mpc_config.limit_weights[2] = 200.0;
+    mpc_config.limit_weights[3] = 200.0;
+    mpc_config.limit_lower[1] = -45.0 * 3.141592653589793 / 180.0;
+    mpc_config.limit_upper[1] = 5.0 * 3.141592653589793 / 180.0;
+    mpc_config.limit_lower[2] = -50.0 * 3.141592653589793 / 180.0;
+    mpc_config.limit_upper[2] = 50.0 * 3.141592653589793 / 180.0;
+    mpc_config.limit_lower[3] = -45.0 * 3.141592653589793 / 180.0;
+    mpc_config.limit_upper[3] = 45.0 * 3.141592653589793 / 180.0;
+    TcrgMpc* solver = tcrg_mpc_create(&model, &mpc_config, 2);
+    if (solver == NULL) {
+        printf("创建 MPC 求解器失败: %s\n", tcrg_last_error());
+        tcrg_context_destroy(context);
+        return 1;
+    }
+    double targets[40];
+    for (int k = 0; k < 10; ++k) {
+        for (int i = 0; i < 4; ++i) {
+            targets[k * 4 + i] = 0.1 * (double)((k + i) % 5 - 2);
+        }
+    }
+    for (int round = 0; round < 2; ++round) {
+        double command[4] = {0.0, 0.0, 0.0, 0.0};
+        TcrgMpcInfo info;
+        memset(&info, 0, sizeof(info));
+        TcrgTerrain mpc_terrain;
+        mpc_terrain.slope_angle = 0.05;
+        mpc_terrain.slope_direction = 0.7;
+        TcrgBaseState mpc_base;
+        memset(&mpc_base, 0, sizeof(mpc_base));
+        TcrgState mpc_state;
+        memset(&mpc_state, 0, sizeof(mpc_state));
+        mpc_state.angle[0] = 0.2;
+        mpc_state.angle[1] = -0.05;
+        if (tcrg_mpc_solve(solver, &mpc_terrain, &mpc_base, &mpc_state, targets, NULL,
+                           command, &info) != 0) {
+            printf("MPC 求解失败: %s\n", tcrg_last_error());
+            tcrg_mpc_destroy(solver);
+            tcrg_context_destroy(context);
+            return 1;
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (!isfinite(command[i]) || command[i] < -mpc_config.torque_limit - 1e-9 ||
+                command[i] > mpc_config.torque_limit + 1e-9) {
+                printf("MPC 力矩不是有限值或越界\n");
+                tcrg_mpc_destroy(solver);
+                tcrg_context_destroy(context);
+                return 1;
+            }
+        }
+        if (!isfinite(info.loss) || info.evaluations <= 0 || info.iterations <= 0) {
+            printf("MPC 求解信息不合理\n");
+            tcrg_mpc_destroy(solver);
+            tcrg_context_destroy(context);
+            return 1;
+        }
+    }
+    tcrg_mpc_reset(solver);
+    tcrg_mpc_destroy(solver);
     tcrg_context_destroy(context);
     printf("C 接口校验通过\n");
     return 0;

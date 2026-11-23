@@ -1,16 +1,16 @@
-"""滚动时域 MPC 控制器。
+"""滚动时域 MPC 控制器：求解在 C++ 端完成。
 
-每个控制拍求解一个 K 步有限时域最优控制问题，决策变量为 K×4 个关节力矩，
-箱约束为 ±torque_limit；求解器为 scipy L-BFGS-B。目标函数与梯度全部由
-C 接口 tcrg_control_gradient 一次调用给出（反向伴随法），Python 侧不手算轨迹梯度。
+Python 只负责把当前状态、地形、底盘状态与未来目标角度交给 gimbal_dynamics.MpcSolver；
+C++ 端完成代价组装、反向伴随梯度、投影 L-BFGS 与箱约束，返回本拍力矩。热启动解与上一拍
+实际力矩由求解器内部维护，reset() 清除。
 
-代价构成（K 为预测步数，损失已按 1/K 做时间平均）：
-  1/K Σ_k Σ_i [ wa_i (q_ki - q*_ki)^2 + wv_i (v_ki - v*_ki)^2
-                + wt_i τ_ki^2 + wr_i (τ_ki - τ_{k-1,i})^2
+代价（K 为预测步数，损失按 1/K 取时间平均）：
+  1/K Σ_k Σ_i [ wa_i (q_ki − q*_ki)^2 + wv_i v_ki^2
+                + wt_i τ_ki^2 + wr_i (τ_ki − τ_{k−1,i})^2
                 + wl_i hinge_i(q_ki)^2 ]
-  + 1/K Σ_i [ waT_i (q_Ki - q*_{K-1,i})^2 + wvT_i (v_Ki - v*_{K-1,i})^2 ]
-其中 τ_{-1,i} 为上一拍实际施加的力矩，hinge_i 为关节软限位二次铰链
-（关节 1 为无限位大 yaw，不设铰链；其余关节按 gimbal_env 的硬限位向内收 0.07 rad）。
+角速度目标恒为零，wv_i 只作为速度正则化。k = 0 的变化率项参照上一次采用的第一步力矩，
+由求解器内部维护。hinge_i 为关节软限位二次铰链（关节 1 为无限位大 yaw，不设铰链；
+其余关节按 gimbal_env 的硬限位向内收 0.07 rad）。
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from __future__ import annotations
 import time
 
 import numpy as np
-from scipy.optimize import minimize
 
 import gimbal_dynamics as gd
 import gimbal_env
@@ -28,6 +27,9 @@ REFINEMENT = gimbal_env.REFINEMENT
 TORQUE_LIMIT = 8.0
 HORIZON = 20
 LIMIT_MARGIN = 0.07
+MAX_ITER = 30
+TOLERANCE = 1e-4
+THREADS = 4
 
 LIMITS = gimbal_env.JOINT_LIMITS
 LIMIT_LOWER = np.array([-np.inf if limits[0] is None else limits[0]
@@ -37,14 +39,12 @@ LIMIT_UPPER = np.array([np.inf if limits[1] is None else limits[1]
 
 
 def default_weights() -> dict:
-    """默认代价权重。终端权重相对逐步跟踪权重放大，限位项取高权重把轨迹推离挡块。"""
+    """默认代价权重。速度项是零目标的正则化；限位项取高权重把轨迹推离挡块。"""
     return {
         "angle_weights": np.array([1.0, 1.0, 1.0, 1.0]),
-        "velocity_weights": np.array([0.05, 0.05, 0.05, 0.05]),
+        "velocity_weights": np.array([0.001, 0.001, 0.001, 0.001]),
         "torque_weights": np.array([0.001, 0.001, 0.001, 0.001]),
         "torque_rate_weights": np.array([0.01, 0.01, 0.01, 0.01]),
-        "terminal_angle_weights": np.array([30.0, 30.0, 30.0, 30.0]),
-        "terminal_velocity_weights": np.array([3.0, 3.0, 3.0, 3.0]),
         "limit_weights": np.array([0.0, 200.0, 200.0, 200.0]),
         "limit_lower": LIMIT_LOWER,
         "limit_upper": LIMIT_UPPER,
@@ -53,117 +53,59 @@ def default_weights() -> dict:
 
 
 class MpcController:
-    """滚动时域力矩控制器。
+    """滚动时域力矩控制器：每个控制拍调用一次 C++ 求解器。
 
-    solve() 返回本拍施加的力矩（4 维），并保留上一拍解用于下一刻热启动。
+    solve() 返回本拍施加的力矩（4 维），求解器内部保留完整解用于下一刻热启动。
     """
 
-    def __init__(self, context: gd.Context, model: gd.TcrgModel,
-                 horizon: int = HORIZON, torque_limit: float = TORQUE_LIMIT,
-                 weights: dict | None = None, max_iter: int = 30,
-                 refinement: int = REFINEMENT, dt: float = DT):
-        self.context = context
+    def __init__(self, model: gd.TcrgModel, horizon: int = HORIZON,
+                 torque_limit: float = TORQUE_LIMIT, weights: dict | None = None,
+                 max_iter: int = MAX_ITER, tolerance: float = TOLERANCE,
+                 refinement: int = REFINEMENT, dt: float = DT,
+                 thread_count: int = THREADS):
         self.model = model
         self.horizon = int(horizon)
         self.torque_limit = float(torque_limit)
         self.weights = default_weights() if weights is None else dict(weights)
         self.max_iter = int(max_iter)
+        self.tolerance = float(tolerance)
         self.refinement = int(refinement)
         self.dt = float(dt)
-        self._solution = None
-        self._previous_torque = np.zeros(4)
+        self.solver = gd.MpcSolver(
+            model, horizon=self.horizon, step=self.dt, refinement=self.refinement,
+            torque_limit=self.torque_limit, max_iter=self.max_iter,
+            tolerance=self.tolerance, weights=self.weights,
+            thread_count=int(thread_count))
         self.last_info = {}
+        self._last_command = np.zeros(4)
 
     @property
     def last_torque(self) -> np.ndarray:
-        return self._previous_torque.copy()
+        return self._last_command.copy()
 
     def reset(self) -> None:
-        """清空热启动解与上一拍力矩，供界面复位或回合切换使用。"""
-        self._solution = None
-        self._previous_torque = np.zeros(4)
+        """清空热启动解与上一拍力矩，供回合切换使用。"""
+        self.solver.reset()
         self.last_info = {}
+        self._last_command = np.zeros(4)
 
-    def _warm_start(self, initial: gd.TcrgState, terrain: gd.TcrgTerrain,
-                    base: gd.TcrgBaseState) -> np.ndarray:
-        """上一拍解左移一位、末位保持；首拍无解时用当前状态的偏置力矩铺满预测区间。"""
-        if self._solution is not None:
-            start = np.empty_like(self._solution)
-            start[:-1] = self._solution[1:]
-            start[-1] = self._solution[-1]
-            return start
-        bias = np.asarray(self.context.bias_torque(self.model, terrain, base, initial))
-        return np.tile(bias, (self.horizon, 1))
-
-    def command(self, angle, velocity, target_angle, target_velocity,
+    def command(self, angle, velocity, target_angle,
                 terrain: gd.TcrgTerrain, base: gd.TcrgBaseState) -> np.ndarray:
         """与 PID 控制器共用的调用接口，等价于 solve。"""
-        return self.solve(angle, velocity, target_angle, target_velocity, terrain, base)
+        return self.solve(angle, velocity, target_angle, terrain, base)
 
-    def solve(self, angle, velocity, target_angle, target_velocity,
+    def solve(self, angle, velocity, target_angle,
               terrain: gd.TcrgTerrain, base: gd.TcrgBaseState) -> np.ndarray:
-        angle = np.asarray(angle, dtype=float).reshape(4)
-        velocity = np.asarray(velocity, dtype=float).reshape(4)
         target_angle = np.asarray(target_angle, dtype=float)
-        target_velocity = np.asarray(target_velocity, dtype=float)
         if target_angle.shape != (self.horizon, 4):
             raise ValueError(f"target_angle 形状必须为 ({self.horizon}, 4)")
-        if target_velocity.shape != (self.horizon, 4):
-            raise ValueError(f"target_velocity 形状必须为 ({self.horizon}, 4)")
         initial = gd.make_state(angle, velocity)
-        limit = self.torque_limit
-        cache: dict = {}
-        call_count = [0]
-
-        def evaluate(flat: np.ndarray) -> dict:
-            # fun 与 jac 共享缓存：同一迭代点只调用一次 C 接口
-            if "flat" not in cache or not np.array_equal(cache["flat"], flat):
-                call_count[0] += 1
-                torques = np.asarray(flat, dtype=float).reshape(self.horizon, 4)
-                loss, gradient, _ = self.context.control_gradient(
-                    self.model, terrain, base, initial, torques,
-                    target_angle=target_angle,
-                    target_velocity=target_velocity,
-                    previous_torque=self._previous_torque,
-                    step=self.dt,
-                    refinement=self.refinement,
-                    **self.weights,
-                )
-                cache["flat"] = np.array(flat, dtype=float, copy=True)
-                cache["loss"] = float(loss)
-                cache["gradient"] = np.asarray(gradient, dtype=float).reshape(-1)
-            return cache
-
-        def fun(flat: np.ndarray) -> float:
-            return evaluate(flat)["loss"]
-
-        def jac(flat: np.ndarray) -> np.ndarray:
-            return evaluate(flat)["gradient"]
-
-        start = np.clip(self._warm_start(initial, terrain, base), -limit, limit)
         started = time.perf_counter()
-        result = minimize(
-            fun,
-            start.reshape(-1),
-            jac=jac,
-            method="L-BFGS-B",
-            bounds=[(-limit, limit)] * (self.horizon * 4),
-            options={"maxiter": self.max_iter, "maxcor": 10, "ftol": 1e-12,
-                     "gtol": 1e-6, "maxls": 30},
-        )
-        elapsed = time.perf_counter() - started
-        solution = np.clip(np.asarray(result.x, dtype=float).reshape(self.horizon, 4),
-                           -limit, limit)
-        self._solution = solution
-        command = solution[0].copy()
-        self._previous_torque = command.copy()
-        self.last_info = {
-            "success": bool(result.success),
-            "iterations": int(result.nit),
-            "evaluations": int(result.nfev),
-            "loss": float(result.fun),
-            "solve_time": elapsed,
-            "gradient_norm": float(np.linalg.norm(np.asarray(result.jac, dtype=float))),
-            "calls": call_count[0],
-        }
-        return command
+        command, info = self.solver.solve(initial, terrain, base, target_angle)
+        info["solve_time"] = time.perf_counter() - started
+        self.last_info = info
+        self._last_command = np.asarray(command, dtype=float)
+        return self._last_command
+
+    def close(self) -> None:
+        self.solver.close()

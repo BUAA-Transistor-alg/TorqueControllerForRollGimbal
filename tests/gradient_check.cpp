@@ -19,7 +19,7 @@ Real forward_loss(ForwardSimulation<Real>& handler, const support::Problem<Real>
     return output.loss;
 }
 
-// 扩展损失算例：终端跟踪、关节软限位二次铰链、力矩变化率全部激活。
+// 扩展损失算例：关节软限位二次铰链与力矩变化率全部激活，变化率第一步参照 previous_torque。
 // 限位设置使 4 个关节在轨迹起点都位于铰链的二次增长区间，其中关节 1 从下侧越界。
 struct ExtendedProblem {
     support::Problem<double> problem;
@@ -29,8 +29,6 @@ struct ExtendedProblem {
         problem = support::make_problem<double>(8);
         problem.spec.refinement = 2;
         problem.loss.torque_rate_weights = math::Vector<double, 4>::from(0.7, 0.4, 0.6, 0.5);
-        problem.loss.terminal_angle_weights = math::Vector<double, 4>::from(3.0, 2.0, 2.5, 3.5);
-        problem.loss.terminal_velocity_weights = math::Vector<double, 4>::from(1.5, 1.0, 1.2, 0.8);
         problem.loss.limit_weights = math::Vector<double, 4>::from(2.0, 2.5, 1.5, 2.0);
         problem.loss.limit_lower = math::Vector<double, 4>::from(-0.50, -0.08, -0.20, -0.20);
         problem.loss.limit_upper = math::Vector<double, 4>::from(0.15, 0.50, 0.14, 0.03);
@@ -258,8 +256,6 @@ bool check_extended_batch() {
     input.loss_weights.velocity_weights = single.loss.velocity_weights;
     input.loss_weights.torque_weights = single.loss.torque_weights;
     input.loss_weights.torque_rate_weights = single.loss.torque_rate_weights;
-    input.loss_weights.terminal_angle_weights = single.loss.terminal_angle_weights;
-    input.loss_weights.terminal_velocity_weights = single.loss.terminal_velocity_weights;
     input.loss_weights.limit_weights = single.loss.limit_weights;
     input.loss_weights.limit_lower = single.loss.limit_lower;
     input.loss_weights.limit_upper = single.loss.limit_upper;
@@ -291,6 +287,56 @@ bool check_extended_batch() {
     return true;
 }
 
+bool check_previous_torque() {
+    // 只有力矩变化率权重时，k = 0 项必须包含 τ_0 与 previous_torque 之差
+    support::Problem<double> problem = support::make_problem<double>(2);
+    problem.loss = simulation::LossSpecT<double>();
+    problem.loss.torque_rate_weights =
+        math::Vector<double, 4>::from(2.0, 3.0, 4.0, 5.0);
+    for (std::size_t k = 0; k < problem.num_steps; ++k) {
+        for (int i = 0; i < 4; ++i) {
+            problem.torque[k][i] = 0.0;
+        }
+    }
+    std::vector<math::Vector<double, 4>> previous(1);
+    previous[0] = math::Vector<double, 4>::from(0.5, -0.25, 0.1, -0.2);
+    ForwardSimulation<double> forward(1);
+    problem.loss.previous_torque = previous.data();
+    const double with_previous = forward_loss(forward, problem);
+    problem.loss.previous_torque = nullptr;
+    const double without_previous = forward_loss(forward, problem);
+    double expected = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        expected += problem.loss.torque_rate_weights[i] * previous[0][i] * previous[0][i];
+    }
+    expected /= static_cast<double>(problem.num_steps);
+    const double loss_error = std::fabs((with_previous - without_previous) - expected) /
+                              std::max(1.0, expected);
+    printf("力矩变化率首步参照上一拍力矩的损失差相对偏差 = %.3e\n", loss_error);
+
+    // 解析梯度中 τ_0 的差分：∂L/∂τ_0 的差值应为 -2/K · wr · previous
+    problem.loss.previous_torque = previous.data();
+    ControlGradient<double> handler(1);
+    ControlGradientOutputT<double> with_output;
+    handler.run(support::control_input(problem), with_output);
+    problem.loss.previous_torque = nullptr;
+    ControlGradientOutputT<double> without_output;
+    handler.run(support::control_input(problem), without_output);
+    double gradient_error = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const double expected_gradient =
+            -2.0 / static_cast<double>(problem.num_steps) *
+            problem.loss.torque_rate_weights[i] * previous[0][i];
+        const double actual = static_cast<double>(with_output.gradient[0][i] -
+                                                  without_output.gradient[0][i]);
+        gradient_error = std::max(gradient_error,
+                                  std::fabs(actual - expected_gradient) /
+                                      std::max(1.0, std::fabs(expected_gradient)));
+    }
+    printf("力矩变化率首步梯度差相对偏差 = %.3e\n", gradient_error);
+    return loss_error < 1e-12 && gradient_error < 1e-12;
+}
+
 bool check_float() {
     auto problem = support::make_problem<float>(20);
     ControlGradient<float> handler(4);
@@ -319,6 +365,10 @@ int main() {
         return 1;
     }
     if (!check_extended_batch()) {
+        printf("校验失败\n");
+        return 1;
+    }
+    if (!check_previous_torque()) {
         printf("校验失败\n");
         return 1;
     }

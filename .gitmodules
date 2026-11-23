@@ -1,0 +1,3 @@
+[submodule "sub_module/Sentry2Communicator"]
+	path = sub_module/Sentry2Communicator
+	url = https://github.com/BUAA-Transistor-alg/Sentry2Communicator

@@ -48,16 +48,15 @@ typedef struct TcrgLossSpec {
     const double* target_velocity;
 } TcrgLossSpec;
 
-// 控制量梯度使用的 MPC 代价配置：跟踪、力矩幅值、力矩变化率、关节软限位与终端项。
+// 控制量梯度使用的 MPC 代价配置：跟踪、力矩幅值、力矩变化率与关节软限位。
 // target_angle / target_velocity 长度均为 num_steps*4；previous_torque 长度为 4。
-// 三个指针均可为空：空目标按 0 处理，空 previous_torque 表示跳过 k = 0 的变化率项。
+// 三个指针均可为空：空目标按 0 处理，空 previous_torque 表示跳过 k = 0 的变化率项；
+// previous_torque 非空时，它是上一次采用的第一步力矩，τ_0 与它的差距计入变化率项。
 typedef struct TcrgControlLoss {
     double angle_weights[4];
     double velocity_weights[4];
     double torque_weights[4];
     double torque_rate_weights[4];
-    double terminal_angle_weights[4];
-    double terminal_velocity_weights[4];
     double limit_weights[4];
     double limit_lower[4];
     double limit_upper[4];
@@ -66,6 +65,37 @@ typedef struct TcrgControlLoss {
     const double* target_velocity;
     const double* previous_torque;
 } TcrgControlLoss;
+
+// MPC 求解器配置：时域、步长、约束、迭代上限、收敛阈值与完整代价权重。
+// 限位区间由 limit_lower / limit_upper / limit_margin 给出；权重为零的关节不参与限位项。
+// 求解器内部维护上一次采用的第一步力矩，变化率项包含 τ_0 与它的差距。
+typedef struct TcrgMpcConfig {
+    size_t horizon;
+    double step;
+    int refinement;
+    double torque_limit;
+    int max_iter;
+    double tolerance;
+    double angle_weights[4];
+    double velocity_weights[4];
+    double torque_weights[4];
+    double torque_rate_weights[4];
+    double limit_weights[4];
+    double limit_lower[4];
+    double limit_upper[4];
+    double limit_margin[4];
+} TcrgMpcConfig;
+
+// 单次 MPC 求解信息
+typedef struct TcrgMpcInfo {
+    double loss;
+    int iterations;
+    int evaluations;
+    int converged;
+    double projected_gradient;
+} TcrgMpcInfo;
+
+typedef struct TcrgMpc TcrgMpc;
 
 // 创建/销毁上下文；thread_count 为参与前向仿真的总线程数（含调用线程），1 表示串行。
 TcrgContext* tcrg_context_create(int thread_count);
@@ -115,6 +145,19 @@ int tcrg_control_gradient(const TcrgContext* context, const TcrgModel* model,
                           size_t num_steps, double step, int refinement,
                           const TcrgControlLoss* loss_spec, double* loss,
                           TcrgState* final_state, double* gradient);
+
+// 创建 MPC 求解器：model 在创建时固定，thread_count 为参与阶段 Jacobian 计算的线程数。
+// 求解器内部维护热启动解与上一拍实际力矩，Python 或 C 调用方只需提供当前状态与目标。
+TcrgMpc* tcrg_mpc_create(const TcrgModel* model, const TcrgMpcConfig* config,
+                         int thread_count);
+void tcrg_mpc_destroy(TcrgMpc* solver);
+void tcrg_mpc_reset(TcrgMpc* solver);
+
+// 求解本拍：target_angle 长度 horizon*4（第 k 行为预测第 k+1 拍的目标），
+// target_velocity 可为空（为空时角速度目标为零）；torque 与 info 分别写回本拍力矩与求解信息。
+int tcrg_mpc_solve(TcrgMpc* solver, const TcrgTerrain* terrain, const TcrgBaseState* base,
+                   const TcrgState* initial, const double* target_angle,
+                   const double* target_velocity, double torque[4], TcrgMpcInfo* info);
 
 // 40 个惯性基参数（每个刚体 m、h、I_o 的 10 个分量）与 4 个阻尼参数的
 // 逆动力学基矩阵。basis 的行顺序为 4 个关节力矩，列顺序为 44 个参数。

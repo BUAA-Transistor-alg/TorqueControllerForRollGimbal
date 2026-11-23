@@ -76,6 +76,11 @@ if(GIMBAL_DYNAMICS_BUILD_TESTS)
     target_compile_options(gradient_check PRIVATE -Wall -Wextra)
     add_test(NAME gradient_check COMMAND gradient_check)
 
+    add_executable(mpc_check tests/mpc_check.cpp)
+    target_link_libraries(mpc_check PRIVATE gimbal_dynamics)
+    target_compile_options(mpc_check PRIVATE -Wall -Wextra)
+    add_test(NAME mpc_check COMMAND mpc_check)
+
     add_executable(concurrency_check tests/concurrency_check.cpp)
     target_link_libraries(concurrency_check PRIVATE gimbal_dynamics)
     target_compile_options(concurrency_check PRIVATE -Wall -Wextra)
@@ -99,4 +104,35 @@ if(GIMBAL_DYNAMICS_BUILD_TESTS)
     target_compile_options(c_api_check PRIVATE -Wall -Wextra)
     add_test(NAME c_api_check COMMAND c_api_check)
     set_tests_properties(c_api_check PROPERTIES TIMEOUT 120)
+endif()
+
+# 实车环境：由子模组 Sentry2Communicator 的 ipc_client 读写实车控制器
+option(GIMBAL_DYNAMICS_BUILD_ROBOT_IPC "构建实车 IPC 桥接库" ON)
+if(GIMBAL_DYNAMICS_BUILD_ROBOT_IPC)
+    set(SENTRY2_IPC_CLIENT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sub_module/Sentry2Communicator/ipc_client")
+    if(NOT EXISTS "${SENTRY2_IPC_CLIENT_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR "子模组 Sentry2Communicator 未初始化，请执行 git submodule update --init --recursive")
+    endif()
+    add_subdirectory("${SENTRY2_IPC_CLIENT_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/sentry2communicator_ipc_client")
+
+    add_library(robot_ipc_c SHARED
+        src/robot_ipc/c_api.cpp
+        src/robot_ipc/chassis_pose.cpp
+        src/robot_ipc/robot_client.cpp)
+    target_include_directories(robot_ipc_c PUBLIC include)
+    target_link_libraries(robot_ipc_c PRIVATE ipc_client Threads::Threads)
+    target_compile_options(robot_ipc_c PRIVATE -Wall -Wextra)
+    set_target_properties(robot_ipc_c PROPERTIES OUTPUT_NAME robot_ipc)
+
+    if(GIMBAL_DYNAMICS_BUILD_TESTS)
+        add_executable(robot_pose_check tests/robot_pose_check.cpp src/robot_ipc/chassis_pose.cpp)
+        target_include_directories(robot_pose_check PRIVATE include)
+        target_compile_options(robot_pose_check PRIVATE -Wall -Wextra)
+        add_test(NAME robot_pose_check COMMAND robot_pose_check)
+
+        add_executable(robot_ipc_check tests/robot_ipc_check.cpp)
+        target_link_libraries(robot_ipc_check PRIVATE robot_ipc_c)
+        target_compile_options(robot_ipc_check PRIVATE -Wall -Wextra)
+        add_test(NAME robot_ipc_check COMMAND robot_ipc_check)
+    endif()
 endif()
