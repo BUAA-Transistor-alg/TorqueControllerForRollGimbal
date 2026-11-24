@@ -86,10 +86,10 @@ tcrg::gimbal_dynamics::mpc::ConfigT<double> convert_mpc_config(const TcrgMpcConf
     config.horizon = source.horizon;
     config.step = source.step;
     config.refinement = source.refinement;
-    config.torque_limit = source.torque_limit;
     config.max_iter = source.max_iter;
     config.tolerance = source.tolerance;
     for (int joint = 0; joint < 4; ++joint) {
+        config.torque_limit[joint] = source.torque_limit[joint];
         config.loss.angle_weights[joint] = source.angle_weights[joint];
         config.loss.velocity_weights[joint] = source.velocity_weights[joint];
         config.loss.torque_weights[joint] = source.torque_weights[joint];

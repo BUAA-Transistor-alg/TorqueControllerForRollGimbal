@@ -125,10 +125,10 @@ int main(void) {
     mpc_config.horizon = 10;
     mpc_config.step = 0.01;
     mpc_config.refinement = 2;
-    mpc_config.torque_limit = 8.0;
     mpc_config.max_iter = 20;
     mpc_config.tolerance = 1e-3;
     for (int i = 0; i < 4; ++i) {
+        mpc_config.torque_limit[i] = 8.0 - 0.5 * (double)i;
         mpc_config.angle_weights[i] = 1.0;
         mpc_config.velocity_weights[i] = 0.001;
         mpc_config.torque_weights[i] = 0.001;
@@ -179,8 +179,9 @@ int main(void) {
             return 1;
         }
         for (int i = 0; i < 4; ++i) {
-            if (!isfinite(command[i]) || command[i] < -mpc_config.torque_limit - 1e-9 ||
-                command[i] > mpc_config.torque_limit + 1e-9) {
+            if (!isfinite(command[i]) ||
+                command[i] < -mpc_config.torque_limit[i] - 1e-9 ||
+                command[i] > mpc_config.torque_limit[i] + 1e-9) {
                 printf("MPC 力矩不是有限值或越界\n");
                 tcrg_mpc_destroy(solver);
                 tcrg_context_destroy(context);

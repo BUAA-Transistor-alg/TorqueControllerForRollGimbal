@@ -95,7 +95,7 @@ class TcrgMpcConfig(ctypes.Structure):
         ("horizon", ctypes.c_size_t),
         ("step", ctypes.c_double),
         ("refinement", ctypes.c_int),
-        ("torque_limit", ctypes.c_double),
+        ("torque_limit", ctypes.c_double * 4),
         ("max_iter", ctypes.c_int),
         ("tolerance", ctypes.c_double),
         ("angle_weights", ctypes.c_double * 4),
@@ -663,23 +663,31 @@ class MpcSolver:
     """C++ 端滚动时域 MPC 求解器的 Python 包装。
 
     每个控制拍调用 tcrg_mpc_solve：输入当前状态、地形、底盘状态与未来 horizon 步目标角度，
-    C++ 内部完成代价组装、反向伴随梯度、投影 L-BFGS 与箱约束，返回本拍力矩。热启动解与
-    上一拍实际力矩由求解器内部维护，reset() 清除。角速度目标可以为空，为空时目标取零。
+    C++ 内部完成代价组装、反向伴随梯度、投影 L-BFGS 与箱约束，返回本拍力矩。torque_limit 为
+    四个轴的力矩上限（N·m），默认取 params.AXIS_TORQUE_LIMIT。热启动解与上一拍实际力矩由求解器
+    内部维护，reset() 清除。角速度目标可以为空，为空时目标取零。
     """
 
     def __init__(self, model: TcrgModel, horizon: int = 20, step: float = 0.01,
-                 refinement: int = 2, torque_limit: float = 8.0, max_iter: int = 30,
-                 tolerance: float = 1e-4, weights: dict | None = None,
-                 thread_count: int = 4):
+                 refinement: int = 2,
+                 torque_limit: Sequence[float] = default_params.AXIS_TORQUE_LIMIT,
+                 max_iter: int = 30, tolerance: float = 1e-4,
+                 weights: dict | None = None, thread_count: int = 4):
         self.model = model
         self.horizon = int(horizon)
-        self.torque_limit = float(torque_limit)
+        self.torque_limit = np.asarray(torque_limit, dtype=float)
+        if self.torque_limit.shape != (4,):
+            raise ValueError("torque_limit 形状必须为 (4,)")
+        if (not np.all(np.isfinite(self.torque_limit))
+                or np.any(self.torque_limit <= 0.0)):
+            raise ValueError("torque_limit 各分量必须是大于 0 的有限值")
         config = TcrgMpcConfig()
         config.horizon = self.horizon
         config.step = float(step)
         config.refinement = int(refinement)
-        config.torque_limit = self.torque_limit
         config.max_iter = int(max_iter)
+        for joint, value in enumerate(self.torque_limit):
+            config.torque_limit[joint] = float(value)
         config.tolerance = float(tolerance)
         weights = {} if weights is None else dict(weights)
         for name in ("angle_weights", "velocity_weights", "torque_weights",

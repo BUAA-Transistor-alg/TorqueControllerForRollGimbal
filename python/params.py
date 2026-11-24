@@ -39,13 +39,17 @@ DAMPING = [0.01, 0.01, 0.01, 0.01]
 GRAVITY = 9.81
 
 # PID 目标模式参数：四个关节的位置目标由按键以恒定速度移动，PID 计算力矩
-PID_TARGET_RATE = 10.0          # 按下按键时目标位置的速度，rad/s
+PID_TARGET_RATE = 3.0          # 按下按键时目标位置的速度，rad/s
 PID_TARGET_LIMIT = 3.14159265  # 目标位置限幅，rad
 PID_KP = [8.0, 2.0, 2.0, 2.0]
 PID_KI = [0.2, 0.2, 0.2, 0.2]
 PID_KD = [0.5, 0.2, 0.15, 0.1]
 PID_TORQUE_LIMIT = 10.0        # PID 输出力矩限幅，N·m
 PID_INTEGRAL_LIMIT = 2.0
+
+# 各轴力矩上限（N·m），取实车通信子模组 McuDataPreprocessor 中四个力矩最大值的绝对值。
+# 关节顺序：大 yaw、roll、小 yaw、pitch。
+AXIS_TORQUE_LIMIT = [6.561, 6.640, 2.000, 3.992]
 
 # 供 UI 使用的关节轴方向（父坐标系）
 JOINT_AXES = [

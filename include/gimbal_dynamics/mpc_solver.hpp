@@ -4,8 +4,8 @@
 //
 // 求解器内部维护热启动解与上一拍实际力矩，每次 solve 输入当前状态、地形、底盘状态与
 // 未来 horizon 步目标，返回本拍应施加的力矩。决策变量为 horizon×4 个关节力矩，箱约束为
-// ±torque_limit；代价与梯度由 ControlGradient 处理器的反向伴随法给出，优化器为带箱约束的
-// 有限内存拟牛顿法（L-BFGS 方向 + 投影 Armijo 线搜索）。
+// 各关节 ±torque_limit_i；代价与梯度由 ControlGradient 处理器的反向伴随法给出，优化器为带
+// 箱约束的有限内存拟牛顿法（L-BFGS 方向 + 投影 Armijo 线搜索）。
 //
 // 代价（K 为预测步数，损失按 1/K 取时间平均）：
 //   1/K Σ_k Σ_i [ wa_i (q_ki − q*_ki)^2 + wv_i (v_ki − v*_ki)^2
@@ -35,7 +35,10 @@ struct ConfigT {
     std::size_t horizon = 20;
     Real step = Real(0.01);
     int refinement = 2;
-    Real torque_limit = Real(8);
+    // 各关节力矩上限（N·m），取实车通信子模组 McuDataPreprocessor 中四个力矩最大值的绝对值；
+    // 关节顺序：大 yaw、roll、小 yaw、pitch。
+    math::Vector<Real, 4> torque_limit =
+        math::Vector<Real, 4>::from(Real(6.561), Real(6.640), Real(2.000), Real(3.992));
     int max_iter = 40;
     Real tolerance = Real(1e-4);
     simulation::LossWeightsT<Real> loss;
@@ -118,8 +121,11 @@ void SolverT<Real>::validate_config() const {
     if (config_.refinement < 1) {
         throw std::invalid_argument("MPC 细化倍数必须大于等于 1");
     }
-    if (!(config_.torque_limit > Real(0)) || !std::isfinite(config_.torque_limit)) {
-        throw std::invalid_argument("MPC 力矩上限必须是大于 0 的有限值");
+    for (int joint = 0; joint < 4; ++joint) {
+        if (!(config_.torque_limit[joint] > Real(0)) ||
+            !std::isfinite(config_.torque_limit[joint])) {
+            throw std::invalid_argument("MPC 各轴力矩上限必须是大于 0 的有限值");
+        }
     }
     if (config_.max_iter < 1) {
         throw std::invalid_argument("MPC 迭代上限必须大于等于 1");
@@ -152,7 +158,7 @@ math::Vector<Real, 4> SolverT<Real>::solve(const simulation::StateT<Real>& initi
     }
     const std::size_t count = config_.horizon;
     const std::size_t dimensions = count * 4;
-    const Real limit = config_.torque_limit;
+    const math::Vector<Real, 4>& limit = config_.torque_limit;
     std::vector<BaseStateT<Real>> bases(count, base);
     std::vector<math::Vector<Real, 4>> torques(count, math::Vector<Real, 4>::zero());
     std::vector<Real> x(dimensions, Real(0));
@@ -167,8 +173,10 @@ math::Vector<Real, 4> SolverT<Real>::solve(const simulation::StateT<Real>& initi
     InfoT<Real> result;
     int evaluations = 0;
 
-    const auto clamp_torque = [limit](Real value) {
-        return std::min(std::max(value, -limit), limit);
+    // 箱约束按关节分别施加，索引除以 4 的余数即该分量的关节号
+    const auto clamp_torque = [&limit](std::size_t index, Real value) {
+        const Real axis_limit = limit[static_cast<int>(index % 4)];
+        return std::min(std::max(value, -axis_limit), axis_limit);
     };
     const auto evaluate = [&](const std::vector<Real>& values,
                               std::vector<Real>& output_gradient) {
@@ -232,7 +240,7 @@ math::Vector<Real, 4> SolverT<Real>::solve(const simulation::StateT<Real>& initi
         }
     }
     for (std::size_t index = 0; index < dimensions; ++index) {
-        x[index] = clamp_torque(x[index]);
+        x[index] = clamp_torque(index, x[index]);
     }
 
     Real loss_value = evaluate(x, gradient);
@@ -243,7 +251,7 @@ math::Vector<Real, 4> SolverT<Real>::solve(const simulation::StateT<Real>& initi
         // 投影梯度范数，用作收敛判定
         projected_gradient = Real(0);
         for (std::size_t index = 0; index < dimensions; ++index) {
-            const Real projected = clamp_torque(x[index] - gradient[index]);
+            const Real projected = clamp_torque(index, x[index] - gradient[index]);
             projected_gradient = std::max(projected_gradient, std::fabs(x[index] - projected));
         }
         if (projected_gradient <= config_.tolerance) {
@@ -302,7 +310,7 @@ math::Vector<Real, 4> SolverT<Real>::solve(const simulation::StateT<Real>& initi
         bool accepted = false;
         for (int backtrack = 0; backtrack < 30; ++backtrack) {
             for (std::size_t j = 0; j < dimensions; ++j) {
-                trial[j] = clamp_torque(x[j] + step * direction[j]);
+                trial[j] = clamp_torque(j, x[j] + step * direction[j]);
             }
             Real move = Real(0);
             for (std::size_t j = 0; j < dimensions; ++j) {
@@ -336,7 +344,7 @@ math::Vector<Real, 4> SolverT<Real>::solve(const simulation::StateT<Real>& initi
             step = Real(1) / std::max(largest, Real(1e-6));
             for (int backtrack = 0; backtrack < 30; ++backtrack) {
                 for (std::size_t j = 0; j < dimensions; ++j) {
-                    trial[j] = clamp_torque(x[j] + step * direction[j]);
+                    trial[j] = clamp_torque(j, x[j] + step * direction[j]);
                 }
                 Real move = Real(0);
                 for (std::size_t j = 0; j < dimensions; ++j) {

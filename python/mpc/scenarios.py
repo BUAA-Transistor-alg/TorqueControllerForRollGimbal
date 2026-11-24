@@ -1,12 +1,14 @@
 """闭环评估场景：参考轨迹、底盘运动、地形、量测噪声与被控对象。
 
-被控对象用真实参数或按比例失配后的参数，限定 8 N·m 力矩上限，关节硬限位按
-刚性挡块处理并统计撞限位步数；控制器只能看到带噪声的量测和给定模型。
+被控对象用真实参数或按比例失配后的参数，各轴力矩上限取实车通信子模组
+McuDataPreprocessor 中四个力矩最大值的绝对值，关节硬限位按刚性挡块处理并统计撞限位步数；
+控制器只能看到带噪声的量测和给定模型。
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +19,7 @@ import params
 
 DT = gimbal_env.DT
 REFINEMENT = gimbal_env.REFINEMENT
-TORQUE_LIMIT = 8.0
+TORQUE_LIMIT = np.asarray(params.AXIS_TORQUE_LIMIT, dtype=float)
 VELOCITY_LIMIT = 15.0
 LIMIT_MARGIN = 0.07
 OUT_OF_RANGE_MARGIN = 0.30
@@ -207,8 +209,9 @@ class Scenario:
 
 def run_closed_loop(scenario: Scenario, controller, plant_model: gd.TcrgModel,
                     context: gd.Context, noise_seed: int = 0,
-                    torque_limit: float = TORQUE_LIMIT) -> dict:
+                    torque_limit: Sequence[float] = TORQUE_LIMIT) -> dict:
     """闭环仿真：控制器只用带噪声量测与给定模型，被控对象按硬挡块处理限位。"""
+    limit = np.asarray(torque_limit, dtype=float)
     steps = scenario.steps
     horizon = int(getattr(controller, "horizon", 1))
     rng = np.random.default_rng(noise_seed)
@@ -230,7 +233,7 @@ def run_closed_loop(scenario: Scenario, controller, plant_model: gd.TcrgModel,
         command = np.asarray(controller.command(
             measured["angle"], measured["velocity"], target_angle,
             measured["terrain"], measured["base"]), dtype=float)
-        command = np.clip(command, -torque_limit, torque_limit)
+        command = np.clip(command, -limit, limit)
         command_history[index] = command
         info = getattr(controller, "last_info", {})
         solve_time[index] = float(info.get("solve_time", 0.0))

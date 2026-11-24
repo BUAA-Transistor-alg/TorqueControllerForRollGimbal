@@ -1,6 +1,7 @@
 // 校验：C++ MPC 求解器的箱约束、损失一致性、迭代下降、热启动与复位行为。
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 #include <vector>
 
 #include "gimbal_dynamics/handlers.hpp"
@@ -16,7 +17,7 @@ mpc::ConfigT<double> make_config(std::size_t horizon, int max_iter) {
     config.horizon = horizon;
     config.step = 0.01;
     config.refinement = 2;
-    config.torque_limit = 5.0;
+    config.torque_limit = math::Vector<double, 4>::from(5.0, 4.0, 3.0, 2.0);
     config.max_iter = max_iter;
     config.tolerance = 1e-4;
     config.loss.angle_weights = math::Vector<double, 4>::from(1.0, 1.0, 1.0, 1.0);
@@ -31,9 +32,11 @@ mpc::ConfigT<double> make_config(std::size_t horizon, int max_iter) {
     return config;
 }
 
-bool finite_and_bounded(const math::Vector<double, 4>& torque, double limit) {
+bool finite_and_bounded(const math::Vector<double, 4>& torque,
+                        const math::Vector<double, 4>& limit) {
     for (int joint = 0; joint < 4; ++joint) {
-        if (!std::isfinite(torque[joint]) || std::fabs(torque[joint]) > limit + 1e-9) {
+        if (!std::isfinite(torque[joint]) ||
+            std::fabs(torque[joint]) > limit[joint] + 1e-9) {
             return false;
         }
     }
@@ -163,10 +166,78 @@ bool check_solver() {
     return true;
 }
 
+// 默认各轴力矩上限取实车通信子模组 McuDataPreprocessor 中四个力矩最大值的绝对值。
+bool check_default_limits() {
+    const mpc::ConfigT<double> config;
+    const double expected[4] = {6.561, 6.640, 2.000, 3.992};
+    for (int joint = 0; joint < 4; ++joint) {
+        if (std::fabs(config.torque_limit[joint] - expected[joint]) > 1e-12) {
+            printf("关节 %d 的默认力矩上限与标定值不一致\n", joint);
+            return false;
+        }
+    }
+    return true;
+}
+
+// 各轴箱约束独立生效：第一个关节放宽，其余三轴收紧，求解结果必须落在各自上限内。
+bool check_axis_limits() {
+    const std::size_t horizon = 10;
+    support::Problem<double> problem = support::make_problem<double>(horizon);
+    // 目标偏离初值较远，迫使力矩饱和到箱约束边界
+    for (std::size_t k = 0; k < horizon; ++k) {
+        problem.target_angle[k] = math::Vector<double, 4>::from(0.8, -0.8, 0.8, -0.8);
+        problem.target_velocity[k] = math::Vector<double, 4>::zero();
+    }
+    mpc::ConfigT<double> config = make_config(horizon, 40);
+    config.torque_limit = math::Vector<double, 4>::from(0.5, 0.005, 0.005, 0.005);
+    mpc::SolverT<double> solver(1, problem.model, config);
+    mpc::InfoT<double> info;
+    const math::Vector<double, 4> command =
+        solver.solve(problem.initial, problem.terrain, problem.base[0],
+                     problem.target_angle.data(), problem.target_velocity.data(), &info);
+    if (!finite_and_bounded(command, config.torque_limit)) {
+        printf("本拍力矩没有落在各轴上限内\n");
+        return false;
+    }
+    for (const math::Vector<double, 4>& step : solver.solution()) {
+        if (!finite_and_bounded(step, config.torque_limit)) {
+            printf("预测区间的力矩没有落在各轴上限内\n");
+            return false;
+        }
+    }
+    // 收紧的关节必须确实被自身上限约束住，否则无法区分各轴上限
+    for (int joint = 1; joint < 4; ++joint) {
+        if (!(std::fabs(command[joint]) > 0.5 * config.torque_limit[joint])) {
+            printf("关节 %d 没有受到自身箱约束作用\n", joint);
+            return false;
+        }
+    }
+    return true;
+}
+
+// 任一轴的力矩上限非法时构造求解器必须报错。
+bool check_invalid_limit() {
+    support::Problem<double> problem = support::make_problem<double>(5);
+    mpc::ConfigT<double> config = make_config(5, 1);
+    config.torque_limit[2] = 0.0;
+    bool thrown = false;
+    try {
+        mpc::SolverT<double> solver(1, problem.model, config);
+    } catch (const std::invalid_argument&) {
+        thrown = true;
+    }
+    if (!thrown) {
+        printf("非法轴力矩上限没有报错\n");
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
-    if (!check_solver()) {
+    if (!check_default_limits() || !check_solver() || !check_axis_limits() ||
+        !check_invalid_limit()) {
         printf("MPC 求解器校验失败\n");
         return 1;
     }

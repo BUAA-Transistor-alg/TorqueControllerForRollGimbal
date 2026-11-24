@@ -1,8 +1,9 @@
 """滚动时域 MPC 控制器：求解在 C++ 端完成。
 
 Python 只负责把当前状态、地形、底盘状态与未来目标角度交给 gimbal_dynamics.MpcSolver；
-C++ 端完成代价组装、反向伴随梯度、投影 L-BFGS 与箱约束，返回本拍力矩。热启动解与上一拍
-实际力矩由求解器内部维护，reset() 清除。
+C++ 端完成代价组装、反向伴随梯度、投影 L-BFGS 与箱约束，返回本拍力矩。箱约束为各轴
+±params.AXIS_TORQUE_LIMIT，取实车通信子模组 McuDataPreprocessor 中四个力矩最大值的绝对值。
+热启动解与上一拍实际力矩由求解器内部维护，reset() 清除。
 
 代价（K 为预测步数，损失按 1/K 取时间平均）：
   1/K Σ_k Σ_i [ wa_i (q_ki − q*_ki)^2 + wv_i v_ki^2
@@ -16,15 +17,20 @@ C++ 端完成代价组装、反向伴随梯度、投影 L-BFGS 与箱约束，�
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 
 import numpy as np
 
 import gimbal_dynamics as gd
 import gimbal_env
+import params
 
 DT = gimbal_env.DT
 REFINEMENT = gimbal_env.REFINEMENT
-TORQUE_LIMIT = 8.0
+
+# 各轴力矩上限（N·m），取实车通信子模组 McuDataPreprocessor 中四个力矩最大值的绝对值。
+TORQUE_LIMIT = np.asarray(params.AXIS_TORQUE_LIMIT, dtype=float)
+
 HORIZON = 20
 LIMIT_MARGIN = 0.07
 MAX_ITER = 30
@@ -59,13 +65,19 @@ class MpcController:
     """
 
     def __init__(self, model: gd.TcrgModel, horizon: int = HORIZON,
-                 torque_limit: float = TORQUE_LIMIT, weights: dict | None = None,
+                 torque_limit: Sequence[float] = TORQUE_LIMIT,
+                 weights: dict | None = None,
                  max_iter: int = MAX_ITER, tolerance: float = TOLERANCE,
                  refinement: int = REFINEMENT, dt: float = DT,
                  thread_count: int = THREADS):
         self.model = model
         self.horizon = int(horizon)
-        self.torque_limit = float(torque_limit)
+        self.torque_limit = np.asarray(torque_limit, dtype=float)
+        if self.torque_limit.shape != (4,):
+            raise ValueError("torque_limit 形状必须为 (4,)")
+        if (not np.all(np.isfinite(self.torque_limit))
+                or np.any(self.torque_limit <= 0.0)):
+            raise ValueError("torque_limit 各分量必须是大于 0 的有限值")
         self.weights = default_weights() if weights is None else dict(weights)
         self.max_iter = int(max_iter)
         self.tolerance = float(tolerance)

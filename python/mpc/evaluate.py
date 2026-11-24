@@ -1,4 +1,4 @@
-"""闭环评估：同一场景、同一力矩上限下对比 PID 与两种 MPC。
+"""闭环评估：同一场景、同一组各轴力矩上限下对比 PID 与两种 MPC。
 
 PID 使用 params.py 的 KP/KI/KD 与 bias_torque 前馈；MPC 分别使用设计参数模型与
 data/identified_final.npz 的辨识参数模型。被控对象默认为失配参数，关节限位按硬挡块
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -37,10 +38,11 @@ class PidController:
     horizon = 1
 
     def __init__(self, context: gd.Context, model: gd.TcrgModel,
-                 torque_limit: float = TORQUE_LIMIT, dt: float = scenarios.DT):
+                 torque_limit: Sequence[float] = TORQUE_LIMIT,
+                 dt: float = scenarios.DT):
         self.context = context
         self.model = model
-        self.torque_limit = float(torque_limit)
+        self.torque_limit = np.asarray(torque_limit, dtype=float)
         self.dt = float(dt)
         self.kp = np.asarray(params.PID_KP, dtype=float)
         self.ki = np.asarray(params.PID_KI, dtype=float)
@@ -91,6 +93,7 @@ def compute_metrics(records: dict, scenario: scenarios.Scenario) -> dict:
         "hit_steps": int(np.sum(records["hits"])),
         "torque_square": float(np.mean(command ** 2)),
         "torque_max": float(np.max(np.abs(command))),
+        "torque_axis_max": np.max(np.abs(command), axis=0),
         "solve_ms": float(1000.0 * np.mean(records["solve_time"])),
         "solve_ms_max": float(1000.0 * np.max(records["solve_time"])),
         "iterations": float(np.mean(records["iterations"])),
@@ -168,7 +171,8 @@ def plot_error(scenario, runs, output: Path) -> None:
     plt.close(figure)
 
 
-def plot_torque(scenario, runs, output: Path, torque_limit: float) -> None:
+def plot_torque(scenario, runs, output: Path, torque_limit) -> None:
+    limit = np.asarray(torque_limit, dtype=float)
     time = np.arange(scenario.steps) * scenarios.DT
     figure, axes = plt.subplots(2, 2, figsize=(12.0, 7.5), sharex=True)
     for joint in range(4):
@@ -176,15 +180,15 @@ def plot_torque(scenario, runs, output: Path, torque_limit: float) -> None:
         for name, records in runs.items():
             axis.plot(time, records["command"][:, joint], color=COLORS[name],
                       linestyle=LINE_STYLES[name], linewidth=1.1, label=name)
-        axis.axhline(torque_limit, color="tab:red", linewidth=0.9, linestyle="--")
-        axis.axhline(-torque_limit, color="tab:red", linewidth=0.9, linestyle="--")
+        axis.axhline(limit[joint], color="tab:red", linewidth=0.9, linestyle="--")
+        axis.axhline(-limit[joint], color="tab:red", linewidth=0.9, linestyle="--")
         axis.set_ylabel("torque (N·m)")
-        axis.set_title(LABELS[joint])
+        axis.set_title("%s (limit ±%.3f N·m)" % (LABELS[joint], limit[joint]))
         axis.grid(alpha=0.3)
     axes.reshape(-1)[0].legend(fontsize=8)
     for axis in axes[-1]:
         axis.set_xlabel("time (s)")
-    figure.suptitle("commanded torque (limit ±%.1f N·m)" % torque_limit)
+    figure.suptitle("commanded torque with per-axis limits")
     figure.tight_layout()
     figure.savefig(output, dpi=140)
     plt.close(figure)
@@ -212,12 +216,23 @@ def plot_metrics(metrics: dict, output: Path) -> None:
     plt.close(figure)
 
 
+def parse_torque_limit(text: str) -> np.ndarray:
+    """把逗号分隔的四个数值解析为各轴力矩上限。"""
+    values = np.array([float(item) for item in text.split(",")], dtype=float)
+    if values.shape != (4,):
+        raise argparse.ArgumentTypeError("各轴力矩上限需要四个逗号分隔的数值")
+    if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+        raise argparse.ArgumentTypeError("各轴力矩上限必须是大于 0 的有限值")
+    return values
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="PID 与 MPC 闭环对比")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--plant", choices=("mismatch", "truth"), default="mismatch")
-    parser.add_argument("--torque-limit", type=float, default=TORQUE_LIMIT)
+    parser.add_argument("--torque-limit", type=parse_torque_limit, default=TORQUE_LIMIT,
+                        help="四个轴的力矩上限（N·m，逗号分隔），默认取 params.AXIS_TORQUE_LIMIT")
     parser.add_argument("--horizon", type=int, default=HORIZON)
     parser.add_argument("--max-iter", type=int, default=30)
     parser.add_argument("--threads", type=int, default=4)
@@ -236,6 +251,8 @@ def main() -> None:
              np.degrees(scenario.slope), np.degrees(scenario.direction),
              scenario.reference_angle[:, 0].max() - scenario.reference_angle[:, 0].min()))
     print("被控对象: " + plant_name)
+    print("各轴力矩上限: %s N·m" % np.array2string(
+        np.asarray(arguments.torque_limit, dtype=float), precision=3))
     runs = {}
     metrics = {}
     # 前向仿真与 MPC 求解共享同一线程数；MPC 求解器在 C++ 内部并行阶段 Jacobian，
@@ -284,9 +301,11 @@ def main() -> None:
             print("[未通过] %s 限位内平均 RMSE %.4f 高于 PID %.4f"
                   % (name, metrics[name]["mean_rmse"], metrics["PID"]["mean_rmse"]))
     for name, values in metrics.items():
-        if values["torque_max"] > arguments.torque_limit + 1e-9:
+        if np.any(values["torque_axis_max"]
+                  > np.asarray(arguments.torque_limit) + 1e-9):
             passed = False
-            print("[未通过] %s 力矩越界 %.4f" % (name, values["torque_max"]))
+            print("[未通过] %s 力矩越界 %s" % (
+                name, np.array2string(values["torque_axis_max"], precision=4)))
     print("结果:", "通过" if passed else "未通过")
     if not passed:
         sys.exit(1)

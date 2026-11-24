@@ -67,13 +67,14 @@ typedef struct TcrgControlLoss {
 } TcrgControlLoss;
 
 // MPC 求解器配置：时域、步长、约束、迭代上限、收敛阈值与完整代价权重。
-// 限位区间由 limit_lower / limit_upper / limit_margin 给出；权重为零的关节不参与限位项。
+// 各关节力矩箱约束为 ±torque_limit[i]，关节顺序：大 yaw、roll、小 yaw、pitch；限位区间由
+// limit_lower / limit_upper / limit_margin 给出；权重为零的关节不参与限位项。
 // 求解器内部维护上一次采用的第一步力矩，变化率项包含 τ_0 与它的差距。
 typedef struct TcrgMpcConfig {
     size_t horizon;
     double step;
     int refinement;
-    double torque_limit;
+    double torque_limit[4];
     int max_iter;
     double tolerance;
     double angle_weights[4];
