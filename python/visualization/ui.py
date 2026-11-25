@@ -11,8 +11,12 @@ GimbalEnv；换成真实世界控制时实现同一个接口并在创建 Viewer 
   5 / 6   关节 3  同上
   7 / 8   关节 4  同上
   m       在直接力矩、PID 目标位置、策略网络目标位置、MPC 目标位置四种模式间切换
+  l       锁定/解锁 roll 轴（仅仿真后端；锁定在当前实际角度）
   r       回到零位
   q/ESC   退出
+
+锁定 roll 轴后动力学切换到三自由度合并模型，roll 目标固定为锁定角且 roll 按键失效；
+解锁后 roll 目标保持锁定角，按键恢复控制。实机后端没有这个功能。
 
 策略模式使用训练好的循环残差 SAC 控制器（默认 data/rl_final.pt）：目标位置与 PID 模式同样由
 按键以固定速度移动，策略模式下大 yaw 的目标位置不限幅，其余三轴的目标位置限制在硬限位内侧
@@ -182,6 +186,9 @@ class Viewer:
         self.axis_ids = [-1, -1, -1, -1]
 
         self.env = make_simulation_env() if environment is None else environment
+        self.lock_available = bool(getattr(self.env, "supports_roll_lock", False))
+        self.roll_locked = False
+        self.locked_roll_angle = None
         self.pressed: set[int] = set()
         self.mode = mode
         self.target_rate = params.PID_TARGET_RATE if target_rate is None else target_rate
@@ -204,6 +211,8 @@ class Viewer:
         return self.controllers[self.mode]
 
     def reset(self) -> None:
+        self.roll_locked = False
+        self.locked_roll_angle = None
         self.pressed.clear()
         self.observation = self.env.reset({"angle": [0.0] * 4, "velocity": [0.0] * 4})
         current = self.controller()
@@ -212,7 +221,38 @@ class Viewer:
         self.update_visuals()
 
     def inputs(self) -> list[tuple[int, float]]:
-        return [KEY_JOINT[key] for key in self.pressed]
+        pairs = [KEY_JOINT[key] for key in self.pressed]
+        if self.roll_locked:
+            pairs = [pair for pair in pairs if pair[0] != 1]
+        return pairs
+
+    def _enforce_roll_target(self) -> None:
+        if not self.roll_locked or self.locked_roll_angle is None:
+            return
+        controller = self.controllers.get(self.mode)
+        target = getattr(controller, "target", None)
+        if target is not None:
+            target[1] = float(self.locked_roll_angle)
+
+    def toggle_roll_lock(self) -> None:
+        if not self.lock_available:
+            return
+        if self.roll_locked:
+            self.env.unlock_roll()
+            self.roll_locked = False
+            self.observation = self.env.observation()
+            self._enforce_roll_target()
+            self.update_visuals()
+            return
+        self.env.lock_roll()
+        self.roll_locked = True
+        self.observation = self.env.observation()
+        self.locked_roll_angle = float(self.observation["angle"][1])
+        self.pressed.discard(ord("3"))
+        self.pressed.discard(ord("4"))
+        self.controller()
+        self._enforce_roll_target()
+        self.update_visuals()
 
     def handle_keyboard(self) -> bool:
         for key, event in p.getKeyboardEvents().items():
@@ -226,6 +266,10 @@ class Viewer:
                 modes = ("torque", "pid", "rl", "mpc")
                 self.mode = modes[(modes.index(self.mode) + 1) % len(modes)]
                 self.controller().reset(self.observation)
+                self._enforce_roll_target()
+                continue
+            if key == ord("l") and (event & p.KEY_WAS_TRIGGERED):
+                self.toggle_roll_lock()
                 continue
             if key in KEY_JOINT:
                 if event & p.KEY_WAS_RELEASED:
@@ -236,6 +280,7 @@ class Viewer:
 
     def advance(self) -> None:
         controller = self.controller()
+        self._enforce_roll_target()
         torque = controller.command(self.observation, self.inputs(), STEP)
         self.observation = self.env.step({"torque": torque})
         self.update_visuals()
@@ -269,6 +314,13 @@ class Viewer:
         label = {"torque": "direct torque", "pid": "PID target", "rl": "RL target",
                  "mpc": "MPC target"}[self.mode]
         text = "mode: " + label
+        if self.lock_available:
+            if self.roll_locked:
+                text += f"  roll LOCKED={self.locked_roll_angle:+.2f}"
+            else:
+                text += "  roll free (l)"
+        else:
+            text += "  roll lock unavailable"
         for joint in range(4):
             if getattr(controller, "target", None) is not None:
                 text += f"  T{joint + 1}={controller.target[joint]:+.2f}"
@@ -310,6 +362,8 @@ def main() -> int:
                         help="目标位置模式下按住按键时目标位置速度，rad/s")
     parser.add_argument("--policy", default=None,
                         help="策略模式使用的检查点路径，默认 data/rl_final.pt")
+    parser.add_argument("--lock-roll", action="store_true",
+                        help="无界面模式下在中途锁定 roll 轴，末尾解锁，用于自检")
     arguments = parser.parse_args()
 
     viewer = Viewer(direct=arguments.direct, mode=arguments.mode,
@@ -319,8 +373,17 @@ def main() -> int:
             steps = arguments.steps if arguments.steps > 0 else 60
             if arguments.torque != 0.0:
                 viewer.pressed = {ord("1") if arguments.torque > 0 else ord("2")}
-            for _ in range(steps):
+            lock_step = min(10, max(1, steps // 2))
+            for index in range(steps):
+                if arguments.lock_roll and index == lock_step:
+                    viewer.toggle_roll_lock()
                 viewer.step()
+            if arguments.lock_roll:
+                print("roll lock available:", viewer.lock_available)
+                print("roll locked after run:", viewer.roll_locked)
+                if viewer.roll_locked:
+                    viewer.toggle_roll_lock()
+                print("roll locked after unlock:", viewer.roll_locked)
             angles = viewer.observation["angle"]
             velocities = viewer.observation["velocity"]
             print("mode:", viewer.mode)
@@ -332,7 +395,8 @@ def main() -> int:
             return 0
         print("键盘：1/2 关节1，3/4 关节2，5/6 关节3，7/8 关节4；"
               "力矩模式输出 ±1 N·m，目标位置模式移动目标位置；"
-              "m 循环切换 力矩/PID/策略/MPC 模式；r 复位；q/ESC 退出")
+              "m 循环切换 力矩/PID/策略/MPC 模式；l 锁定/解锁 roll 轴（仅仿真）；"
+              "r 复位；q/ESC 退出")
         next_frame = time.perf_counter()
         while True:
             viewer.step()

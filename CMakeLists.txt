@@ -17,6 +17,9 @@ set(GIMBAL_BACKEND_SOURCES
     src/gimbal_dynamics/stage_jacobians.cpp
     src/gimbal_dynamics/control_gradient.cpp
     src/gimbal_dynamics/parameter_gradient.cpp
+    src/gimbal_dynamics/roll_locked_model.cpp
+    src/gimbal_dynamics/roll_locked_simulation.cpp
+    src/gimbal_dynamics/roll_locked_gradient.cpp
     src/gimbal_dynamics/thread_pool.cpp
     src/gimbal_dynamics/backend_runner.cpp
 )
@@ -76,6 +79,11 @@ if(GIMBAL_DYNAMICS_BUILD_TESTS)
     target_compile_options(gradient_check PRIVATE -Wall -Wextra)
     add_test(NAME gradient_check COMMAND gradient_check)
 
+    add_executable(roll_locked_check tests/roll_locked_check.cpp)
+    target_link_libraries(roll_locked_check PRIVATE gimbal_dynamics)
+    target_compile_options(roll_locked_check PRIVATE -Wall -Wextra)
+    add_test(NAME roll_locked_check COMMAND roll_locked_check)
+
     add_executable(mpc_check tests/mpc_check.cpp)
     target_link_libraries(mpc_check PRIVATE gimbal_dynamics)
     target_compile_options(mpc_check PRIVATE -Wall -Wextra)
@@ -104,6 +112,12 @@ if(GIMBAL_DYNAMICS_BUILD_TESTS)
     target_compile_options(c_api_check PRIVATE -Wall -Wextra)
     add_test(NAME c_api_check COMMAND c_api_check)
     set_tests_properties(c_api_check PROPERTIES TIMEOUT 120)
+
+    add_executable(roll_locked_c_api_check tests/roll_locked_c_api_check.c)
+    target_link_libraries(roll_locked_c_api_check PRIVATE gimbal_dynamics_c)
+    target_compile_options(roll_locked_c_api_check PRIVATE -Wall -Wextra)
+    add_test(NAME roll_locked_c_api_check COMMAND roll_locked_c_api_check)
+    set_tests_properties(roll_locked_c_api_check PROPERTIES TIMEOUT 120)
 endif()
 
 # 实车环境：由子模组 Sentry2Communicator 的 ipc_client 读写实车控制器

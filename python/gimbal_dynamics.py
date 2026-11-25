@@ -69,7 +69,7 @@ class TcrgControlLoss(ctypes.Structure):
                         + wt_i τ_ki^2 + wr_i (τ_ki - τ_{k-1,i})^2
                         + wl_i hinge_i(q_ki)^2 ]
     hinge_i(q) = q - (upper_i - margin_i)（q 高于上软限时），
-                 (lower_i + margin_i) - q（q 低于下软限时），否则为 0。
+                 q - (lower_i + margin_i)（q 低于下软限时，负值），否则为 0。
     τ_{-1,i} 取 previous_torque（上一次采用的第一步力矩）；为空指针时第 0 步跳过变化率项。
     """
 
@@ -82,6 +82,44 @@ class TcrgControlLoss(ctypes.Structure):
         ("limit_lower", ctypes.c_double * 4),
         ("limit_upper", ctypes.c_double * 4),
         ("limit_margin", ctypes.c_double * 4),
+        ("target_angle", ctypes.POINTER(ctypes.c_double)),
+        ("target_velocity", ctypes.POINTER(ctypes.c_double)),
+        ("previous_torque", ctypes.POINTER(ctypes.c_double)),
+    ]
+
+
+class TcrgRollLockedState(ctypes.Structure):
+    """锁定 roll 轴三自由度模型的状态：大 yaw、小 yaw、pitch。"""
+    _fields_ = [
+        ("angle", ctypes.c_double * 3),
+        ("velocity", ctypes.c_double * 3),
+    ]
+
+
+class TcrgRollLockedModel(ctypes.Structure):
+    """合并后的三自由度模型参数，字段顺序与 c_api.h 的 TcrgRollLockedModel 一致。"""
+    _fields_ = [
+        ("mass", ctypes.c_double * 3),
+        ("com", (ctypes.c_double * 3) * 3),
+        ("inertia", (ctypes.c_double * 6) * 3),
+        ("joint_offsets", (ctypes.c_double * 3) * 3),
+        ("damping", ctypes.c_double * 3),
+        ("gravity", ctypes.c_double),
+        ("locked_angle", ctypes.c_double),
+    ]
+
+
+class TcrgRollLockedControlLoss(ctypes.Structure):
+    """锁定 roll 轴三自由度模型的控制量损失，字段顺序与 c_api.h 一致。"""
+    _fields_ = [
+        ("angle_weights", ctypes.c_double * 3),
+        ("velocity_weights", ctypes.c_double * 3),
+        ("torque_weights", ctypes.c_double * 3),
+        ("torque_rate_weights", ctypes.c_double * 3),
+        ("limit_weights", ctypes.c_double * 3),
+        ("limit_lower", ctypes.c_double * 3),
+        ("limit_upper", ctypes.c_double * 3),
+        ("limit_margin", ctypes.c_double * 3),
         ("target_angle", ctypes.POINTER(ctypes.c_double)),
         ("target_velocity", ctypes.POINTER(ctypes.c_double)),
         ("previous_torque", ctypes.POINTER(ctypes.c_double)),
@@ -284,12 +322,83 @@ def _bind_mpc() -> None:
     _mpc_bound = True
 
 
+_roll_locked_bound = False
+
+
+def _bind_roll_locked() -> None:
+    """首次使用时绑定锁定 roll 轴三自由度模型接口。"""
+    global _roll_locked_bound
+    if _roll_locked_bound:
+        return
+    _lib.tcrg_roll_locked_parameters.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(TcrgModel),
+        ctypes.c_double,
+        ctypes.POINTER(TcrgRollLockedModel),
+    ]
+    _lib.tcrg_roll_locked_parameters.restype = ctypes.c_int
+    _lib.tcrg_roll_locked_forward_step.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(TcrgModel),
+        ctypes.c_double,
+        ctypes.POINTER(TcrgTerrain),
+        ctypes.POINTER(TcrgBaseState),
+        ctypes.POINTER(TcrgRollLockedState),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_double,
+        ctypes.c_int,
+        ctypes.POINTER(TcrgRollLockedState),
+    ]
+    _lib.tcrg_roll_locked_forward_step.restype = ctypes.c_int
+    _lib.tcrg_roll_locked_forward_simulate.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(TcrgModel),
+        ctypes.c_double,
+        ctypes.POINTER(TcrgTerrain),
+        ctypes.POINTER(TcrgBaseState),
+        ctypes.POINTER(TcrgRollLockedState),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_size_t,
+        ctypes.c_double,
+        ctypes.c_int,
+        ctypes.POINTER(TcrgRollLockedState),
+    ]
+    _lib.tcrg_roll_locked_forward_simulate.restype = ctypes.c_int
+    _lib.tcrg_roll_locked_control_gradient.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(TcrgModel),
+        ctypes.c_double,
+        ctypes.POINTER(TcrgTerrain),
+        ctypes.POINTER(TcrgBaseState),
+        ctypes.POINTER(TcrgRollLockedState),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_size_t,
+        ctypes.c_double,
+        ctypes.c_int,
+        ctypes.POINTER(TcrgRollLockedControlLoss),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(TcrgRollLockedState),
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    _lib.tcrg_roll_locked_control_gradient.restype = ctypes.c_int
+    _roll_locked_bound = True
+
+
 def _weights(values, name: str, default: float = 0.0) -> List[float]:
     if values is None:
         return [default] * 4
     vector = [float(value) for value in values]
     if len(vector) != 4:
         raise ValueError(f"{name} 长度必须为 4")
+    return vector
+
+
+def _weights3(values, name: str, default: float = 0.0) -> List[float]:
+    if values is None:
+        return [default] * 3
+    vector = [float(value) for value in values]
+    if len(vector) != 3:
+        raise ValueError(f"{name} 长度必须为 3")
     return vector
 
 
@@ -332,6 +441,17 @@ def make_state(angle: Sequence[float] | None = None,
     angle = [0.0] * 4 if angle is None else angle
     velocity = [0.0] * 4 if velocity is None else velocity
     for i in range(4):
+        state.angle[i] = float(angle[i])
+        state.velocity[i] = float(velocity[i])
+    return state
+
+
+def make_roll_locked_state(angle: Sequence[float] | None = None,
+                           velocity: Sequence[float] | None = None) -> TcrgRollLockedState:
+    state = TcrgRollLockedState()
+    angle = [0.0] * 3 if angle is None else angle
+    velocity = [0.0] * 3 if velocity is None else velocity
+    for i in range(3):
         state.angle[i] = float(angle[i])
         state.velocity[i] = float(velocity[i])
     return state
@@ -658,6 +778,203 @@ class Context:
         gradient = np.ctypeslib.as_array(gradient_array).copy().reshape(count, 4)
         return loss_value.value, gradient, final_state
 
+
+    def roll_locked_parameters(self, model: TcrgModel, locked_angle: float) -> dict:
+        """返回合并后的三自由度模型参数（质量、质心、惯量、偏置、阻尼）。"""
+        _bind_roll_locked()
+        parameters = TcrgRollLockedModel()
+        result = _lib.tcrg_roll_locked_parameters(
+            self._context,
+            ctypes.byref(model),
+            ctypes.c_double(float(locked_angle)),
+            ctypes.byref(parameters),
+        )
+        if result != 0:
+            raise _error()
+        return {
+            "mass": [parameters.mass[i] for i in range(3)],
+            "com": [[parameters.com[i][c] for c in range(3)] for i in range(3)],
+            "inertia": [[parameters.inertia[i][c] for c in range(6)] for i in range(3)],
+            "joint_offsets": [[parameters.joint_offsets[i][c] for c in range(3)]
+                              for i in range(3)],
+            "damping": [parameters.damping[i] for i in range(3)],
+            "gravity": parameters.gravity,
+            "locked_angle": parameters.locked_angle,
+        }
+
+    def roll_locked_forward_step(
+        self,
+        model: TcrgModel,
+        locked_angle: float,
+        terrain: TcrgTerrain,
+        base: TcrgBaseState,
+        state: TcrgRollLockedState,
+        torque: Sequence[float],
+        step: float = 0.004,
+        refinement: int = 2,
+    ) -> TcrgRollLockedState:
+        _bind_roll_locked()
+        torque_array = (ctypes.c_double * 3)(*[float(t) for t in torque])
+        next_state = TcrgRollLockedState()
+        result = _lib.tcrg_roll_locked_forward_step(
+            self._context,
+            ctypes.byref(model),
+            ctypes.c_double(float(locked_angle)),
+            ctypes.byref(terrain),
+            ctypes.byref(base),
+            ctypes.byref(state),
+            torque_array,
+            ctypes.c_double(float(step)),
+            ctypes.c_int(int(refinement)),
+            ctypes.byref(next_state),
+        )
+        if result != 0:
+            raise _error()
+        return next_state
+
+    def roll_locked_forward_simulate(
+        self,
+        model: TcrgModel,
+        locked_angle: float,
+        terrain: TcrgTerrain,
+        base: TcrgBaseState,
+        initial: TcrgRollLockedState,
+        torques: Sequence[Sequence[float]],
+        step: float = 0.004,
+        refinement: int = 2,
+    ) -> TcrgRollLockedState:
+        _bind_roll_locked()
+        count = len(torques)
+        if count == 0:
+            raise ValueError("torques 不能为空")
+        flat = (ctypes.c_double * (count * 3))(
+            *[float(value) for row in torques for value in row])
+        final_state = TcrgRollLockedState()
+        result = _lib.tcrg_roll_locked_forward_simulate(
+            self._context,
+            ctypes.byref(model),
+            ctypes.c_double(float(locked_angle)),
+            ctypes.byref(terrain),
+            ctypes.byref(base),
+            ctypes.byref(initial),
+            flat,
+            ctypes.c_size_t(count),
+            ctypes.c_double(float(step)),
+            ctypes.c_int(int(refinement)),
+            ctypes.byref(final_state),
+        )
+        if result != 0:
+            raise _error()
+        return final_state
+
+    def roll_locked_control_gradient(
+        self,
+        model: TcrgModel,
+        locked_angle: float,
+        terrain: TcrgTerrain,
+        base,
+        initial: TcrgRollLockedState,
+        torques: Sequence[Sequence[float]],
+        target_angle: Sequence[Sequence[float]] | None = None,
+        target_velocity: Sequence[Sequence[float]] | None = None,
+        angle_weights: Sequence[float] | None = None,
+        velocity_weights: Sequence[float] | None = None,
+        torque_weights: Sequence[float] | None = None,
+        torque_rate_weights: Sequence[float] | None = None,
+        limit_weights: Sequence[float] | None = None,
+        limit_lower: Sequence[float] | None = None,
+        limit_upper: Sequence[float] | None = None,
+        limit_margin: Sequence[float] | None = None,
+        previous_torque: Sequence[float] | None = None,
+        step: float = 0.01,
+        refinement: int = 2,
+    ):
+        """锁定 roll 轴模型的控制量梯度。
+
+        torques 形状为 (num_steps, 3)，关节顺序为大 yaw、小 yaw、pitch；
+        target_angle/target_velocity 形状为 (num_steps, 3)，为空时按零目标处理；
+        base 为单个 TcrgBaseState（广播）或长度为 num_steps 的序列。
+        返回 (loss, gradient[num_steps, 3], final_state)。
+        """
+        _bind_roll_locked()
+        count = len(torques)
+        if count == 0:
+            raise ValueError("torques 不能为空")
+        torque_array = (ctypes.c_double * (count * 3))(
+            *[float(value) for row in torques for value in row])
+        angle_array = None
+        velocity_array = None
+        if target_angle is not None:
+            values = [float(value) for row in target_angle for value in row]
+            if len(values) != count * 3:
+                raise ValueError("target_angle 的形状必须为 (num_steps, 3)")
+            angle_array = (ctypes.c_double * (count * 3))(*values)
+        if target_velocity is not None:
+            values = [float(value) for row in target_velocity for value in row]
+            if len(values) != count * 3:
+                raise ValueError("target_velocity 的形状必须为 (num_steps, 3)")
+            velocity_array = (ctypes.c_double * (count * 3))(*values)
+        if isinstance(base, TcrgBaseState):
+            base_array = (TcrgBaseState * count)(*[base] * count)
+        else:
+            base_values = list(base)
+            if len(base_values) != count:
+                raise ValueError("base 序列长度必须等于 num_steps")
+            base_array = (TcrgBaseState * count)(*base_values)
+        loss_spec = TcrgRollLockedControlLoss()
+        weight_fields = (
+            ("angle_weights", angle_weights),
+            ("velocity_weights", velocity_weights),
+            ("torque_weights", torque_weights),
+            ("torque_rate_weights", torque_rate_weights),
+            ("limit_weights", limit_weights),
+        )
+        for name, values in weight_fields:
+            field = getattr(loss_spec, name)
+            for joint, value in enumerate(_weights3(values, name)):
+                field[joint] = value
+        for joint, value in enumerate(_weights3(limit_lower, "limit_lower",
+                                                float("-inf"))):
+            loss_spec.limit_lower[joint] = value
+        for joint, value in enumerate(_weights3(limit_upper, "limit_upper",
+                                                float("inf"))):
+            loss_spec.limit_upper[joint] = value
+        for joint, value in enumerate(_weights3(limit_margin, "limit_margin")):
+            loss_spec.limit_margin[joint] = value
+        if angle_array is not None:
+            loss_spec.target_angle = ctypes.cast(angle_array, ctypes.POINTER(ctypes.c_double))
+        if velocity_array is not None:
+            loss_spec.target_velocity = ctypes.cast(velocity_array,
+                                                    ctypes.POINTER(ctypes.c_double))
+        previous_array = None
+        if previous_torque is not None:
+            previous_array = (ctypes.c_double * 3)(
+                *[float(value) for value in previous_torque])
+            loss_spec.previous_torque = ctypes.cast(previous_array,
+                                                    ctypes.POINTER(ctypes.c_double))
+        loss_value = ctypes.c_double()
+        final_state = TcrgRollLockedState()
+        gradient_array = (ctypes.c_double * (count * 3))()
+        result = _lib.tcrg_roll_locked_control_gradient(
+            self._context,
+            ctypes.byref(model),
+            ctypes.c_double(float(locked_angle)),
+            ctypes.byref(terrain),
+            base_array,
+            ctypes.byref(initial),
+            torque_array,
+            ctypes.c_size_t(count),
+            ctypes.c_double(float(step)),
+            ctypes.c_int(int(refinement)),
+            ctypes.byref(loss_spec),
+            ctypes.byref(loss_value),
+            ctypes.byref(final_state),
+            gradient_array,
+        )
+        if result != 0:
+            raise _error()
+        gradient = np.ctypeslib.as_array(gradient_array).copy().reshape(count, 3)
+        return loss_value.value, gradient, final_state
 
 class MpcSolver:
     """C++ 端滚动时域 MPC 求解器的 Python 包装。

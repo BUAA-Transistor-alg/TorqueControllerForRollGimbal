@@ -24,7 +24,7 @@ struct StateT {
 //                  + Σ_i wt_i τ_{k,i}^2 + Σ_i wr_i (τ_{k,i} - τ_{k-1,i})^2
 //                  + Σ_i wl_i hinge_i(q_i)^2 ]
 //   hinge_i(q) = q - (upper_i - margin_i)   当 q > upper_i - margin_i
-//                (lower_i + margin_i) - q   当 q < lower_i + margin_i
+//                q - (lower_i + margin_i)   当 q < lower_i + margin_i（负值）
 //                0                          其余情况
 //   k = 0 的力矩变化率参照 previous_torque（上一次采用的第一步力矩）；
 //   该指针为空时 k = 0 不计算变化率项。

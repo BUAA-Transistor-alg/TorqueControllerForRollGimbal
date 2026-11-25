@@ -199,3 +199,5 @@ $$\mathbf F_i=m_i(\mathbf a_{\mathbf g_i}-\mathbf g_W),\qquad
 \mathbf N_i=R_i\mathbf I_iR_i^T\boldsymbol\alpha_i+\boldsymbol\omega_i\times(R_i\mathbf I_iR_i^T\boldsymbol\omega_i)$$
 
 从 B4 向 B1 递推合力与合力矩（子链的量平移到本关节原点），关节力矩由 $\tau_i=\mathbf a_i^{W}\cdot\mathbf m_i$ 给出（$\mathbf m_i$ 为该关节处的合力矩）。以 $\ddot q=\mathbf 0$ 求值得到 $b$；令 $\dot q=\boldsymbol\omega_0=\boldsymbol\alpha_0=\mathbf a_0=\mathbf 0$，以 $\ddot q=\mathbf e_j$ 求值再减去 $b$，得到 $M$ 的第 $j$ 列。
+
+锁定 roll 关节后的三自由度模型见 [ROLL_LOCKED.md](ROLL_LOCKED.md)。

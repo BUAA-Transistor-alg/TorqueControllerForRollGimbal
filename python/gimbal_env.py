@@ -68,6 +68,8 @@ def clip_angle(angle) -> np.ndarray:
 class Environment(abc.ABC):
     """采集脚本依赖的环境接口。"""
 
+    supports_roll_lock = False
+
     @abc.abstractmethod
     def reset(self, config: dict) -> dict:
         """按配置设置初值，返回实际采用的观测。"""
@@ -84,6 +86,8 @@ class Environment(abc.ABC):
 class GimbalEnv(Environment):
     """刚体链动力学环境，状态由 4 个关节角与 4 个关节角速度组成。"""
 
+    supports_roll_lock = True
+
     def __init__(self, model=None, dt: float = DT, refinement: int = REFINEMENT):
         self.context = gd.Context(1)
         self.model = gd.make_model() if model is None else model
@@ -97,6 +101,9 @@ class GimbalEnv(Environment):
         self._torque_limit = TORQUE_LIMIT
         self.steps = 0
         self.time = 0.0
+        self._locked = False
+        self._locked_angle = None
+        self._locked_state = None
 
     def reset(self, config: dict) -> dict:
         angle = clip_angle(config.get("angle", np.zeros(4)))
@@ -112,23 +119,91 @@ class GimbalEnv(Environment):
         self._applied = np.zeros(4)
         self.steps = 0
         self.time = 0.0
+        self._locked = False
+        self._locked_angle = None
+        self._locked_state = None
         return self.observation()
 
-    def step(self, control: dict) -> dict:
+    def _update_base_sequence(self) -> None:
         if self._base_sequence is not None:
             self.base = make_base_from(self._base_sequence[min(
                 self.steps, len(self._base_sequence) - 1)])
+
+    def _locked_observation_state(self) -> gd.TcrgState:
+        return gd.make_state(
+            [float(self._locked_state.angle[0]), float(self._locked_angle),
+             float(self._locked_state.angle[1]), float(self._locked_state.angle[2])],
+            [float(self._locked_state.velocity[0]), 0.0,
+             float(self._locked_state.velocity[1]), float(self._locked_state.velocity[2])])
+
+    def _mass_matrix(self) -> np.ndarray:
+        zero = [0.0, 0.0, 0.0, 0.0]
+        base_torque = np.asarray(self.context.inverse_dynamics(
+            self.model, self.terrain, self.base, self._state, zero), dtype=float)
+        mass = np.zeros((4, 4))
+        for joint in range(4):
+            qdd = [0.0, 0.0, 0.0, 0.0]
+            qdd[joint] = 1.0
+            mass[:, joint] = (
+                np.asarray(self.context.inverse_dynamics(
+                    self.model, self.terrain, self.base, self._state, qdd), dtype=float)
+                - base_torque)
+        return mass
+
+    def lock_roll(self) -> None:
+        """把 roll 轴锁定在当前实际角度，并按完全非弹性碰撞重分配其余关节速度。"""
+        if not self.supports_roll_lock:
+            raise RuntimeError("当前环境不支持 roll 轴锁定")
+        if self._locked:
+            return
+        angle = np.array([self._state.angle[i] for i in range(4)], dtype=float)
+        velocity = np.array([self._state.velocity[i] for i in range(4)], dtype=float)
+        mass = self._mass_matrix()
+        e2 = np.array([0.0, 1.0, 0.0, 0.0])
+        try:
+            column = np.linalg.solve(mass, e2)
+        except np.linalg.LinAlgError as error:
+            raise RuntimeError("锁定 roll 轴时质量矩阵求解失败") from error
+        if abs(float(column[1])) < 1.0e-12:
+            raise RuntimeError("锁定 roll 轴时质量矩阵的 roll 对角元过小")
+        # 冲量沿 roll 轴：M (qdot_plus - qdot) = e2 * impulse，
+        # 约束 qdot_plus[1] = 0，由此解出 impulse 并重分配其余速度。
+        velocity_plus = velocity - column * (velocity[1] / column[1])
+        velocity_plus[1] = 0.0
+        self._locked_angle = float(angle[1])
+        self._locked_state = gd.make_roll_locked_state(
+            [float(angle[0]), float(angle[2]), float(angle[3])],
+            [float(velocity_plus[0]), float(velocity_plus[2]), float(velocity_plus[3])])
+        self._locked = True
+        self._state = self._locked_observation_state()
+
+    def unlock_roll(self) -> None:
+        if not self._locked:
+            return
+        self._state = self._locked_observation_state()
+        self._locked = False
+        self._locked_state = None
+        self._locked_angle = None
+
+    def step(self, control: dict) -> dict:
+        self._update_base_sequence()
         command = np.asarray(control["torque"], dtype=float)
         self._applied = np.clip(command, -self._torque_limit, self._torque_limit)
-        self._state = self.context.forward_step(self.model, self.terrain, self.base,
-                                                self._state, self._applied, self.dt,
-                                                self.refinement)
+        if self._locked:
+            self._locked_state = self.context.roll_locked_forward_step(
+                self.model, self._locked_angle, self.terrain, self.base,
+                self._locked_state,
+                [float(self._applied[0]), float(self._applied[2]), float(self._applied[3])],
+                self.dt, self.refinement)
+            self._state = self._locked_observation_state()
+        else:
+            self._state = self.context.forward_step(self.model, self.terrain, self.base,
+                                                    self._state, self._applied, self.dt,
+                                                    self.refinement)
         self.steps += 1
         self.time += self.dt
         # 推进后回报新时刻的底盘状态，与真实环境回报实测值的语义一致
-        if self._base_sequence is not None:
-            self.base = make_base_from(self._base_sequence[min(
-                self.steps, len(self._base_sequence) - 1)])
+        self._update_base_sequence()
         return self.observation()
 
     def observation(self) -> dict:

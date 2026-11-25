@@ -6,6 +6,7 @@
 #include "gimbal_dynamics/handlers.hpp"
 #include "gimbal_dynamics/model_evaluation.hpp"
 #include "gimbal_dynamics/mpc_solver.hpp"
+#include "gimbal_dynamics/roll_locked.hpp"
 
 namespace {
 
@@ -79,6 +80,28 @@ bool valid(const TcrgModel* model, const TcrgTerrain* terrain, const TcrgBaseSta
            const TcrgState* state, const double* torque) {
     return model != nullptr && terrain != nullptr && base != nullptr && state != nullptr &&
            torque != nullptr;
+}
+
+tcrg::gimbal_dynamics::roll_locked::StateT convert_roll_locked_state(
+    const TcrgRollLockedState& source) {
+    tcrg::gimbal_dynamics::roll_locked::StateT state;
+    for (int i = 0; i < 3; ++i) {
+        state.angle[i] = source.angle[i];
+        state.velocity[i] = source.velocity[i];
+    }
+    return state;
+}
+
+void store_roll_locked_state(const tcrg::gimbal_dynamics::roll_locked::StateT& state,
+                             TcrgRollLockedState* target) {
+    for (int i = 0; i < 3; ++i) {
+        target->angle[i] = state.angle[i];
+        target->velocity[i] = state.velocity[i];
+    }
+}
+
+tcrg::gimbal_dynamics::roll_locked::Vector3 convert_roll_locked_vector(const double* values) {
+    return tcrg::gimbal_dynamics::roll_locked::Vector3::from(values[0], values[1], values[2]);
 }
 
 tcrg::gimbal_dynamics::mpc::ConfigT<double> convert_mpc_config(const TcrgMpcConfig& source) {
@@ -446,6 +469,205 @@ int tcrg_control_gradient(const TcrgContext* context, const TcrgModel* model,
         for (size_t k = 0; k < num_steps; ++k) {
             for (int i = 0; i < 4; ++i) {
                 gradient[k * 4 + static_cast<size_t>(i)] = output.gradient[k][i];
+            }
+        }
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return 2;
+    }
+}
+
+int tcrg_roll_locked_parameters(const TcrgContext* context, const TcrgModel* model,
+                                double locked_angle, TcrgRollLockedModel* parameters) {
+    if (context == nullptr || model == nullptr || parameters == nullptr) {
+        set_error("参数为空指针");
+        return 1;
+    }
+    try {
+        using namespace tcrg::gimbal_dynamics;
+        const roll_locked::ModelT merged =
+            roll_locked::merge_model(convert_model(*model), locked_angle);
+        for (int body = 0; body < 3; ++body) {
+            parameters->mass[body] = merged.bodies[body].mass;
+            for (int component = 0; component < 3; ++component) {
+                parameters->com[body][component] = merged.bodies[body].com[component];
+                parameters->joint_offsets[body][component] = merged.joint_offsets[body][component];
+            }
+            const math::Matrix<double, 3, 3>& inertia = merged.bodies[body].inertia;
+            parameters->inertia[body][0] = inertia(0, 0);
+            parameters->inertia[body][1] = inertia(1, 1);
+            parameters->inertia[body][2] = inertia(2, 2);
+            parameters->inertia[body][3] = inertia(0, 1);
+            parameters->inertia[body][4] = inertia(0, 2);
+            parameters->inertia[body][5] = inertia(1, 2);
+            parameters->damping[body] = merged.damping[body];
+        }
+        parameters->gravity = merged.gravity;
+        parameters->locked_angle = merged.locked_angle;
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return 2;
+    }
+}
+
+int tcrg_roll_locked_forward_step(const TcrgContext* context, const TcrgModel* model,
+                                  double locked_angle, const TcrgTerrain* terrain,
+                                  const TcrgBaseState* base,
+                                  const TcrgRollLockedState* current, const double torque[3],
+                                  double step, int refinement, TcrgRollLockedState* next) {
+    if (context == nullptr || model == nullptr || terrain == nullptr || base == nullptr ||
+        current == nullptr || torque == nullptr || next == nullptr) {
+        set_error("参数为空指针");
+        return 1;
+    }
+    try {
+        using namespace tcrg::gimbal_dynamics;
+        roll_locked::ForwardInputT input;
+        input.model = convert_model(*model);
+        input.locked_angle = locked_angle;
+        input.terrain = convert_terrain(*terrain);
+        input.initial = convert_roll_locked_state(*current);
+        const BaseStateT<double> base_state = convert_base(*base);
+        const roll_locked::Vector3 torque_vector = convert_roll_locked_vector(torque);
+        input.base = &base_state;
+        input.torque = &torque_vector;
+        input.num_steps = 1;
+        input.spec.step = step;
+        input.spec.refinement = refinement;
+        roll_locked::ForwardOutputT output;
+        roll_locked::simulate(input, output);
+        store_roll_locked_state(output.step_end.back(), next);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return 2;
+    }
+}
+
+int tcrg_roll_locked_forward_simulate(const TcrgContext* context, const TcrgModel* model,
+                                      double locked_angle, const TcrgTerrain* terrain,
+                                      const TcrgBaseState* base,
+                                      const TcrgRollLockedState* initial, const double* torque,
+                                      size_t num_steps, double step, int refinement,
+                                      TcrgRollLockedState* final_state) {
+    if (context == nullptr || model == nullptr || terrain == nullptr || base == nullptr ||
+        initial == nullptr || torque == nullptr || final_state == nullptr) {
+        set_error("参数为空指针");
+        return 1;
+    }
+    if (num_steps == 0) {
+        set_error("num_steps 必须大于 0");
+        return 1;
+    }
+    try {
+        using namespace tcrg::gimbal_dynamics;
+        roll_locked::ForwardInputT input;
+        input.model = convert_model(*model);
+        input.locked_angle = locked_angle;
+        input.terrain = convert_terrain(*terrain);
+        input.initial = convert_roll_locked_state(*initial);
+        const BaseStateT<double> base_state = convert_base(*base);
+        std::vector<BaseStateT<double>> bases(num_steps, base_state);
+        std::vector<roll_locked::Vector3> torques(num_steps);
+        for (size_t k = 0; k < num_steps; ++k) {
+            torques[k] = roll_locked::Vector3::from(torque[k * 3], torque[k * 3 + 1],
+                                                    torque[k * 3 + 2]);
+        }
+        input.base = bases.data();
+        input.torque = torques.data();
+        input.num_steps = num_steps;
+        input.spec.step = step;
+        input.spec.refinement = refinement;
+        roll_locked::ForwardOutputT output;
+        roll_locked::simulate(input, output);
+        store_roll_locked_state(output.step_end.back(), final_state);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error.what());
+        return 2;
+    }
+}
+
+int tcrg_roll_locked_control_gradient(const TcrgContext* context, const TcrgModel* model,
+                                      double locked_angle, const TcrgTerrain* terrain,
+                                      const TcrgBaseState* base,
+                                      const TcrgRollLockedState* initial, const double* torque,
+                                      size_t num_steps, double step, int refinement,
+                                      const TcrgRollLockedControlLoss* loss_spec, double* loss,
+                                      TcrgRollLockedState* final_state, double* gradient) {
+    if (context == nullptr || model == nullptr || terrain == nullptr || base == nullptr ||
+        initial == nullptr || torque == nullptr || loss_spec == nullptr || loss == nullptr ||
+        final_state == nullptr || gradient == nullptr) {
+        set_error("参数为空指针");
+        return 1;
+    }
+    if (num_steps == 0) {
+        set_error("num_steps 必须大于 0");
+        return 1;
+    }
+    try {
+        using namespace tcrg::gimbal_dynamics;
+        roll_locked::ForwardInputT input;
+        input.model = convert_model(*model);
+        input.locked_angle = locked_angle;
+        input.terrain = convert_terrain(*terrain);
+        input.initial = convert_roll_locked_state(*initial);
+        std::vector<BaseStateT<double>> bases(num_steps);
+        for (size_t k = 0; k < num_steps; ++k) {
+            bases[k] = convert_base(base[k]);
+        }
+        std::vector<roll_locked::Vector3> torques(num_steps);
+        for (size_t k = 0; k < num_steps; ++k) {
+            torques[k] = roll_locked::Vector3::from(torque[k * 3], torque[k * 3 + 1],
+                                                    torque[k * 3 + 2]);
+        }
+        for (int joint = 0; joint < 3; ++joint) {
+            input.loss.angle_weights[joint] = loss_spec->angle_weights[joint];
+            input.loss.velocity_weights[joint] = loss_spec->velocity_weights[joint];
+            input.loss.torque_weights[joint] = loss_spec->torque_weights[joint];
+            input.loss.torque_rate_weights[joint] = loss_spec->torque_rate_weights[joint];
+            input.loss.limit_weights[joint] = loss_spec->limit_weights[joint];
+            input.loss.limit_lower[joint] = loss_spec->limit_lower[joint];
+            input.loss.limit_upper[joint] = loss_spec->limit_upper[joint];
+            input.loss.limit_margin[joint] = loss_spec->limit_margin[joint];
+        }
+        std::vector<roll_locked::Vector3> targets_angle(num_steps);
+        std::vector<roll_locked::Vector3> targets_velocity(num_steps);
+        if (loss_spec->target_angle != nullptr) {
+            for (size_t k = 0; k < num_steps; ++k) {
+                targets_angle[k] = roll_locked::Vector3::from(
+                    loss_spec->target_angle[k * 3], loss_spec->target_angle[k * 3 + 1],
+                    loss_spec->target_angle[k * 3 + 2]);
+            }
+            input.loss.target_angle = targets_angle.data();
+        }
+        if (loss_spec->target_velocity != nullptr) {
+            for (size_t k = 0; k < num_steps; ++k) {
+                targets_velocity[k] = roll_locked::Vector3::from(
+                    loss_spec->target_velocity[k * 3], loss_spec->target_velocity[k * 3 + 1],
+                    loss_spec->target_velocity[k * 3 + 2]);
+            }
+            input.loss.target_velocity = targets_velocity.data();
+        }
+        roll_locked::Vector3 previous_torque = roll_locked::Vector3::zero();
+        if (loss_spec->previous_torque != nullptr) {
+            previous_torque = convert_roll_locked_vector(loss_spec->previous_torque);
+            input.loss.previous_torque = &previous_torque;
+        }
+        input.base = bases.data();
+        input.torque = torques.data();
+        input.num_steps = num_steps;
+        input.spec.step = step;
+        input.spec.refinement = refinement;
+        roll_locked::GradientOutputT output;
+        roll_locked::simulate_and_gradient(input, output);
+        *loss = output.loss;
+        store_roll_locked_state(output.final_state, final_state);
+        for (size_t k = 0; k < num_steps; ++k) {
+            for (int joint = 0; joint < 3; ++joint) {
+                gradient[k * 3 + static_cast<size_t>(joint)] = output.gradient[k][joint];
             }
         }
         return 0;
