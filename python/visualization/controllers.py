@@ -20,7 +20,7 @@ import params
 from mpc.controller import LIMITS as MPC_LIMITS
 from mpc.controller import LIMIT_MARGIN as MPC_LIMIT_MARGIN
 from mpc.controller import TORQUE_LIMIT as MPC_TORQUE_LIMIT
-from mpc.controller import MpcController as HorizonMpcController
+from mpc.controller import make_controller
 from target_sequence import TargetSequence
 
 TARGET_LIMIT = params.PID_TARGET_LIMIT
@@ -171,16 +171,13 @@ class MpcController(TargetController):
     每拍求解一个固定时域最优控制问题，代价由角度跟踪、零目标的速度正则化、力矩幅值、
     力矩变化率与关节软限位二次铰链组成，求解器在 C++ 端用反向伴随梯度完成优化。
     目标位置的产生方式与 PID 模式相同；大 yaw 的目标限幅 ±π，其余三轴的目标限制在
-    硬限位内侧 0.07 rad，与代价里的软限位一致。每拍把当前目标压入长度 HORIZON + 1 的
-    目标序列，最旧的元素作为当前参考目标，其余 HORIZON 个元素作为后续各步的预测目标，
-    已压入的目标点数值不再变化。
+    硬限位内侧 0.07 rad，与代价里的软限位一致。每拍把当前目标压入长度等于预测步数加一
+    的目标序列，最旧的元素作为当前参考目标，其余元素作为后续各步的预测目标，
+    已压入的目标点数值不再变化。预测步数、迭代上限与代价权重取 mpc.controller 的
+    robust 参数集合（20 步、12 次迭代）。
     """
 
-    HORIZON = 15
-    MAX_ITER = 8
-
-    def __init__(self, target_rate: float, model=None,
-                 horizon: int = HORIZON, max_iter: int = MAX_ITER):
+    def __init__(self, target_rate: float, model=None):
         super().__init__(target_rate)
         self.bounds = [
             (float(MPC_LIMITS[joint][0]) + MPC_LIMIT_MARGIN,
@@ -189,9 +186,8 @@ class MpcController(TargetController):
             for joint in range(4)
         ]
         self.model = gd.make_model() if model is None else model
-        self.mpc = HorizonMpcController(self.model, horizon=horizon,
-                                        torque_limit=MPC_TORQUE_LIMIT,
-                                        max_iter=max_iter, thread_count=4)
+        self.mpc = make_controller(self.model, "robust",
+                                   torque_limit=MPC_TORQUE_LIMIT, thread_count=4)
         self.targets = TargetSequence(self.mpc.horizon, self.target)
 
     def reset(self, observation: dict) -> None:
