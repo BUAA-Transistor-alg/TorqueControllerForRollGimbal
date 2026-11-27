@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import abc
 import sys
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +21,7 @@ from mpc.controller import LIMITS as MPC_LIMITS
 from mpc.controller import LIMIT_MARGIN as MPC_LIMIT_MARGIN
 from mpc.controller import TORQUE_LIMIT as MPC_TORQUE_LIMIT
 from mpc.controller import MpcController as HorizonMpcController
+from target_sequence import TargetSequence
 
 TARGET_LIMIT = params.PID_TARGET_LIMIT
 
@@ -134,7 +134,11 @@ class PidController(TargetController):
 
 
 class RlController(TargetController):
-    """策略网络目标位置：循环残差 SAC 控制器，目标范围与控制器内部的目标裁剪一致。"""
+    """策略网络目标位置：循环残差 SAC 控制器，目标范围与控制器内部的目标裁剪一致。
+
+    每拍把当前目标压入 PolicyController 维护的滚动目标序列，参考目标与预瞄偏移都由该序列
+    给出，已压入的目标点数值不再变化。
+    """
 
     def __init__(self, target_rate: float, policy_path):
         from deploy import PolicyController, target_limits
@@ -162,15 +166,16 @@ class RlController(TargetController):
 
 
 class MpcController(TargetController):
-    """滚动时域 MPC：按住按键移动目标，用目标历史斜率外推未来预测区间的参考。
+    """滚动时域 MPC：按住按键移动当前目标，预测目标由滚动目标序列给出。
 
     每拍求解一个固定时域最优控制问题，代价由角度跟踪、零目标的速度正则化、力矩幅值、
     力矩变化率与关节软限位二次铰链组成，求解器在 C++ 端用反向伴随梯度完成优化。
     目标位置的产生方式与 PID 模式相同；大 yaw 的目标限幅 ±π，其余三轴的目标限制在
-    硬限位内侧 0.07 rad，与代价里的软限位一致。
+    硬限位内侧 0.07 rad，与代价里的软限位一致。每拍把当前目标压入长度 HORIZON + 1 的
+    目标序列，最旧的元素作为当前参考目标，其余 HORIZON 个元素作为后续各步的预测目标，
+    已压入的目标点数值不再变化。
     """
 
-    HISTORY_LENGTH = 21
     HORIZON = 15
     MAX_ITER = 8
 
@@ -187,38 +192,22 @@ class MpcController(TargetController):
         self.mpc = HorizonMpcController(self.model, horizon=horizon,
                                         torque_limit=MPC_TORQUE_LIMIT,
                                         max_iter=max_iter, thread_count=4)
-        self.target_history = deque(
-            [np.zeros(4) for _ in range(self.HISTORY_LENGTH)],
-            maxlen=self.HISTORY_LENGTH)
+        self.targets = TargetSequence(self.mpc.horizon, self.target)
 
     def reset(self, observation: dict) -> None:
         super().reset(observation)
-        target = np.array(self.target, dtype=float)
-        self.target_history = deque([target.copy() for _ in range(self.HISTORY_LENGTH)],
-                                    maxlen=self.HISTORY_LENGTH)
+        self.targets.reset(self.target)
         self.mpc.reset()
-
-    def references(self, dt: float):
-        """由目标历史的最小二乘斜率外推未来 HORIZON 步的目标位置。"""
-        history = np.stack(self.target_history)
-        times = np.arange(len(history)) * float(dt)
-        centered = times - times.mean()
-        denominator = max(float(np.sum(centered ** 2)), 1.0e-9)
-        slope = ((centered[:, None] * (history - history.mean(axis=0))).sum(axis=0)
-                 / denominator)
-        steps = np.arange(1, self.mpc.horizon + 1) * float(dt)
-        return np.stack([self.clamp(list(target))
-                         for target in history[-1][None, :] + slope[None, :] * steps[:, None]])
 
     def command(self, observation: dict, inputs: list[tuple[int, float]],
                 dt: float) -> list[float]:
         self.move_target(inputs, dt)
-        self.target_history.append(np.array(self.target, dtype=float))
+        self.targets.push(self.target)
         angle = np.asarray(observation["angle"], dtype=float)
         velocity = np.asarray(observation["velocity"], dtype=float)
-        target_angle = self.references(dt)
         terrain, base = scenario_from(observation)
-        torque = self.mpc.command(angle, velocity, target_angle, terrain, base)
+        torque = self.mpc.command(angle, velocity, self.targets.predictions,
+                                  terrain, base)
         return [float(value) for value in torque]
 
     @property

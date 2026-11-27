@@ -1,8 +1,9 @@
 """把训练好的循环残差 SAC 控制器部署到 gimbal_dynamics 的状态上。
 
-控制器每 10 ms 更新一次：维护最近 0.2 s 的目标位置缓冲，用缓冲的斜率外推出未来 0.2 s 的预瞄
-参考（相对当前目标），再按训练时的观测布局组装 142 维观测，输出归一化动作并乘以标称电机力矩
-系数得到各关节力矩。目标位置的产生方式与界面里的 PID 模式相同：按住按键以固定速度移动目标。
+控制器每 10 ms 更新一次：每拍把当前目标压入滚动目标序列，序列最旧的元素作为当前参考目标，
+其余 20 个元素给出相对参考目标的预瞄点；已压入的目标点数值不再变化。再按训练时的观测布局
+组装 142 维观测，输出归一化动作并乘以标称电机力矩系数得到各关节力矩。目标位置的产生方式与
+界面里的 PID 模式相同：按住按键以固定速度移动目标。
 
 用法（脚本内）：
     from deploy import PolicyController
@@ -13,7 +14,6 @@
 from __future__ import annotations
 
 import sys
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -26,10 +26,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gimbal_dynamics as gd
 import params
 import tracking_env as te
+from target_sequence import TargetSequence
 
 CONTROL_PERIOD = te.DT
 PREVIEW_COUNT = te.PREVIEW_STEPS
-HISTORY_LENGTH = 21
 VELOCITY_LIMIT = 3.0
 
 
@@ -63,28 +63,18 @@ class PolicyController:
         self.previous_filtered_velocity = np.zeros(4)
         self.load_estimate = np.zeros(4)
         initial = np.zeros(4) if target is None else np.asarray(target, dtype=float).copy()
-        self.target_history = deque([initial.copy() for _ in range(HISTORY_LENGTH)],
-                                    maxlen=HISTORY_LENGTH)
+        self.targets = TargetSequence(PREVIEW_COUNT, initial)
         self.reference = initial.copy()
         self.velocity_reference = np.zeros(4)
         self.preview = np.zeros(PREVIEW_COUNT * 4)
 
     def references(self, target):
-        """把当前目标压入 0.2 s 缓冲，用缓冲斜率外推未来 0.2 s 的预瞄参考。"""
-        self.target_history.append(np.asarray(target, dtype=float).copy())
-        history = np.stack(self.target_history)
-        times = np.arange(len(history)) * CONTROL_PERIOD
-        centered = times - times.mean()
-        denominator = max(float(np.sum(centered ** 2)), 1.0e-9)
-        slope = ((centered[:, None] * (history - history.mean(axis=0))).sum(axis=0)
-                 / denominator)
-        current = history[-1]
-        steps = np.arange(1, PREVIEW_COUNT + 1) * CONTROL_PERIOD
-        future = np.clip(current[None, :] + slope[None, :] * steps[:, None],
-                         te.SOFT_LOW, te.SOFT_HIGH)
-        self.reference = current.copy()
-        self.velocity_reference = np.clip(slope, -VELOCITY_LIMIT, VELOCITY_LIMIT)
-        self.preview = (future - current[None, :]).reshape(-1)
+        """把当前目标压入滚动目标序列，取最旧元素为参考目标并给出预瞄偏移。"""
+        self.targets.push(target)
+        reference, rate, preview = self.targets.relative_preview(CONTROL_PERIOD)
+        self.reference = reference
+        self.velocity_reference = np.clip(rate, -VELOCITY_LIMIT, VELOCITY_LIMIT)
+        self.preview = preview
         return self.reference, self.velocity_reference, self.preview
 
     def torque(self, state, target, terrain=None, base=None):

@@ -12,6 +12,9 @@ C++ 端完成代价组装、反向伴随梯度、投影 L-BFGS 与箱约束，�
 角速度目标恒为零，wv_i 只作为速度正则化。k = 0 的变化率项参照上一次采用的第一步力矩，
 由求解器内部维护。hinge_i 为关节软限位二次铰链（关节 1 为无限位大 yaw，不设铰链；
 其余关节按 gimbal_env 的硬限位向内收 0.07 rad）。
+
+控制器参数以命名集合给出：current 为界面与实车当前使用的参数，robust 为参数失真
+鲁棒性实验调出的另一套参数；两套数值各自保留，默认构造仍使用本文件顶部的默认值。
 """
 
 from __future__ import annotations
@@ -121,3 +124,48 @@ class MpcController:
 
     def close(self) -> None:
         self.solver.close()
+
+
+# 控制器参数集合。current 为界面与实车当前使用的参数（与
+# python/visualization/controllers.py 的 HORIZON=15、MAX_ITER=8 一致），robust 为
+# 参数失真鲁棒性实验调出的另一套参数；两套数值各自保留，互不覆盖。
+def current_parameters() -> dict:
+    """当前控制器参数：预测 15 步、每拍最多迭代 8 次，代价权重取默认值。"""
+    return {"horizon": 15, "max_iter": 8, "tolerance": TOLERANCE,
+            "weights": default_weights()}
+
+
+def robust_parameters() -> dict:
+    """鲁棒参数：在全失真条件下不发散、不震荡且跟踪误差在容差内的另一套参数。
+
+    与当前参数相比：预测步数由 15 增至 20（0.2 s），速度、力矩与力矩变化率权重分别
+    提高到 0.01、0.02、1.5，迭代上限提高到 12。降低的闭环带宽与强的指令变化率惩罚
+    换来了对参数失真、执行增益误差与 0~2 拍随机控制/观测时延的稳定裕度。
+    """
+    weights = default_weights()
+    weights["velocity_weights"] = np.array([0.01, 0.01, 0.01, 0.01])
+    weights["torque_weights"] = np.array([0.02, 0.02, 0.02, 0.02])
+    weights["torque_rate_weights"] = np.array([1.5, 1.5, 1.5, 1.5])
+    return {"horizon": 20, "max_iter": 12, "tolerance": TOLERANCE,
+            "weights": weights}
+
+
+def controller_parameters(name: str) -> dict:
+    """按名称返回完整控制器参数：预测步数、迭代上限、收敛阈值与代价权重。"""
+    sets = {"current": current_parameters, "robust": robust_parameters}
+    if name not in sets:
+        raise ValueError(f"未知的控制器参数集合: {name}")
+    parameters = sets[name]()
+    parameters["weights"] = {
+        key: (value.copy() if isinstance(value, np.ndarray) else value)
+        for key, value in parameters["weights"].items()}
+    return parameters
+
+
+def make_controller(model: gd.TcrgModel, parameter_set: str = "current",
+                    torque_limit: Sequence[float] = TORQUE_LIMIT,
+                    thread_count: int = THREADS) -> MpcController:
+    """按参数集合名称构造控制器。"""
+    parameters = controller_parameters(parameter_set)
+    return MpcController(model, torque_limit=torque_limit,
+                         thread_count=thread_count, **parameters)

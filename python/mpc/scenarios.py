@@ -94,12 +94,20 @@ def mismatch_raw() -> np.ndarray:
 
 
 def generate_reference(rng: np.random.Generator, steps: int,
-                       difficulty: float = 1.0):
+                       difficulty: float = 1.0, step_fraction: float = 1.0,
+                       step_rate: float | None = None):
     """多正弦加随机阶跃与 yaw 漂移的参考角度轨迹，允许超出关节限位。
 
     只生成目标角度；控制器不使用参考角速度，角速度项作为零目标的正则化。
+    step_fraction 限定随阶跃出现的时间占比；step_rate 给定时阶跃按该斜率（rad/s）
+    变成斜坡，为 None 时保持瞬时阶跃。
     """
+    if not 0.0 < step_fraction <= 1.0:
+        raise ValueError("阶跃时间占比必须在 (0, 1] 内")
+    if step_rate is not None and step_rate <= 0.0:
+        raise ValueError("阶跃斜率必须是大于 0 的有限值")
     time = np.arange(steps) * DT
+    step_upper = max(steps // 6 + 1, int(round(steps * step_fraction)))
     angle = np.zeros((steps, 4))
     for joint in range(4):
         signal = np.full(steps, REFERENCE_CENTERS[joint])
@@ -111,11 +119,17 @@ def generate_reference(rng: np.random.Generator, steps: int,
         count = int(rng.integers(0, 4))
         positions = []
         for _ in range(count):
-            index = int(rng.integers(steps // 6, steps))
+            index = int(rng.integers(steps // 6, step_upper))
             if any(abs(index - other) < 100 for other in positions):
                 continue
             positions.append(index)
-            signal[index:] += rng.uniform(-STEP_AMPLITUDE, STEP_AMPLITUDE) * difficulty
+            delta = rng.uniform(-STEP_AMPLITUDE, STEP_AMPLITUDE) * difficulty
+            if step_rate is None or abs(delta) < 1.0e-12:
+                signal[index:] += delta
+            else:
+                progress = np.clip((time[index:] - time[index]) * step_rate
+                                   / abs(delta), 0.0, 1.0)
+                signal[index:] += delta * progress
         if joint == 0 and rng.uniform() < 0.6:
             start = int(rng.integers(0, steps // 3))
             drift = rng.uniform(0.1, DRIFT_RATE) * rng.choice([-1.0, 1.0]) * difficulty
@@ -130,11 +144,13 @@ def generate_reference(rng: np.random.Generator, steps: int,
 class Scenario:
     """一条固定场景：参考、地形、底盘运动、量测偏差与噪声水平。"""
 
-    def __init__(self, seed: int = 7, steps: int = 1000, difficulty: float = 1.0):
+    def __init__(self, seed: int = 7, steps: int = 1000, difficulty: float = 1.0,
+                 step_fraction: float = 1.0, step_rate: float | None = None):
         self.seed = int(seed)
         self.steps = int(steps)
         rng = np.random.default_rng(self.seed)
-        self.reference_angle = generate_reference(rng, self.steps, difficulty)
+        self.reference_angle = generate_reference(
+            rng, self.steps, difficulty, step_fraction, step_rate)
         self.slope = float(rng.uniform(0.05, 0.17))
         self.direction = float(rng.uniform(0.0, 2.0 * math.pi))
         self.terrain = gd.make_terrain(self.slope, self.direction)
