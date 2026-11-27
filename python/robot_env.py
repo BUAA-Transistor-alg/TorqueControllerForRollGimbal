@@ -33,6 +33,8 @@ SAMPLE_TIMEOUT = 0.5
 class RealGimbalEnv(gimbal_env.Environment):
     """实车四自由度云台环境。"""
 
+    supports_base_acceleration = False
+
     def __init__(self, shm_name: str = "/s2c_serial_comm", dt: float = gimbal_env.DT,
                  torque_limit: float = TORQUE_LIMIT,
                  sample_timeout: float = SAMPLE_TIMEOUT):

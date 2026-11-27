@@ -28,10 +28,16 @@ MPC 模式用标称模型求解固定时域最优控制问题，代价包含角�
 力矩变化率与关节软限位，求解器在 C++ 端用反向伴随梯度完成优化；目标位置同样由按键以固定速度移动，
 未来目标由滚动目标序列给出，每拍只新增尾端的当前目标。
 
+界面按观测中的坡度、坡向与底盘 yaw 计算底盘姿态 R0 = R_G R_z(ψ)，地面、基座与四个刚体都画在
+该姿态下。仿真后端可在启动时设置坡度、坡向、底盘 yaw 与参考点加速度；实机后端每个控制拍用头部
+IMU 反解的坡度、坡向与 yaw 更新显示，底盘加速度暂未解算，显示留空。
+
 用法：
   python ui.py                        # GUI
   python ui.py --mode rl              # 启动即进入策略模式
   python ui.py --mode mpc             # 启动即进入 MPC 模式
+  python ui.py --mode mpc --slope-angle 12 --slope-direction -35 --base-yaw 25 --base-acceleration 0.1 -0.05 0.2
+  python ui.py --robot --mode mpc     # 实机后端，坡度、坡向、底盘 yaw 来自 IMU 反解
   python ui.py --direct --steps 100 --mode rl --torque 1   # 无界面自检
   python ui.py --direct --steps 100 --mode mpc --torque 1  # MPC 无界面自检
 
@@ -117,9 +123,24 @@ def quaternion_from_matrix(matrix: np.ndarray) -> list[float]:
     return [x, y, z, w]
 
 
-def link_poses(angle):
+def terrain_rotation(slope_angle: float, slope_direction: float) -> np.ndarray:
+    """地面平面系相对世界系的旋转 R_G = R_z(γ) R_y(λ) R_z(−γ)。"""
+    return (rot_z(slope_direction) @ rot_y(slope_angle)
+            @ rot_z(-slope_direction))
+
+
+def base_rotation(slope_angle: float, slope_direction: float,
+                  yaw: float) -> np.ndarray:
+    """底盘姿态 R_0 = R_G R_z(ψ)，与动力学模型的坐标定义一致。"""
+    return terrain_rotation(slope_angle, slope_direction) @ rot_z(yaw)
+
+
+def link_poses(angle, rotation=None, position=None):
+    """由关节角与底盘位姿计算四个刚体在世界系中的位置与姿态。"""
     q1, q2, q3, q4 = angle
-    r1 = rot_z(q1)
+    r0 = np.eye(3) if rotation is None else np.asarray(rotation, dtype=float)
+    p0 = np.zeros(3) if position is None else np.asarray(position, dtype=float)
+    r1 = r0 @ rot_z(q1)
     r2 = r1 @ rot_y(q2)
     r3 = r2 @ rot_z(q3)
     r4 = r3 @ rot_x(q4)
@@ -127,7 +148,7 @@ def link_poses(angle):
     o2 = np.array(params.JOINT_OFFSETS[1])
     o3 = np.array(params.JOINT_OFFSETS[2])
     o4 = np.array(params.JOINT_OFFSETS[3])
-    p1 = o1
+    p1 = p0 + r0 @ o1
     p2 = p1 + r1 @ o2
     p3 = p2 + r2 @ o3
     p4 = p3 + r3 @ o4
@@ -151,7 +172,8 @@ def create_visual_body(shape_id, position, color, mass: float = 0.0) -> int:
 class Viewer:
     def __init__(self, direct: bool = False, mode: str = "torque",
                  target_rate: float | None = None,
-                 policy_path: str | None = None, environment=None):
+                 policy_path: str | None = None, environment=None,
+                 terrain: dict | None = None, base: dict | None = None):
         if mode not in ("torque", "pid", "rl", "mpc"):
             raise ValueError("未知模式 %s" % mode)
         self.direct = direct
@@ -174,7 +196,8 @@ class Viewer:
             halfExtents=[0.8, 0.8, 0.005],
             rgbaColor=[0.55, 0.55, 0.55, 1.0],
         )
-        self.ground = p.createMultiBody(0.0, ground, basePosition=[0.0, 0.0, -0.005])
+        self.ground = p.createMultiBody(0.0, baseVisualShapeIndex=ground,
+                                        basePosition=[0.0, 0.0, -0.005])
 
         self.bodies = [
             create_visual_body([0.08, 0.08, 0.055], [0, 0, 0], [0.20, 0.45, 0.85, 1.0]),
@@ -188,6 +211,12 @@ class Viewer:
 
         self.env = make_simulation_env() if environment is None else environment
         self.lock_available = bool(getattr(self.env, "supports_roll_lock", False))
+        self.base_acceleration_available = bool(
+            getattr(self.env, "supports_base_acceleration", True))
+        self.terrain_config = (dict(terrain) if terrain is not None
+                               else {"slope_angle": 0.0, "slope_direction": 0.0})
+        self.base_config = (dict(base) if base is not None
+                            else {"acceleration": [0.0, 0.0, 0.0], "yaw": 0.0})
         self.roll_locked = False
         self.locked_roll_angle = None
         self.pressed: set[int] = set()
@@ -197,6 +226,7 @@ class Viewer:
         self.controllers = {}
         self.observation = None
         self.mode_text_id = -1
+        self.base_text_id = -1
         self.reset()
 
     def controller(self):
@@ -215,8 +245,14 @@ class Viewer:
         self.roll_locked = False
         self.locked_roll_angle = None
         self.pressed.clear()
-        self.observation = self.env.reset({"angle": [0.0] * 4, "velocity": [0.0] * 4})
-        current = self.controller()
+        config = {
+            "angle": [0.0] * 4,
+            "velocity": [0.0] * 4,
+            "terrain": dict(self.terrain_config),
+            "base": dict(self.base_config),
+        }
+        self.observation = self.env.reset(config)
+        self.controller()
         for controller in self.controllers.values():
             controller.reset(self.observation)
         self.update_visuals()
@@ -288,15 +324,30 @@ class Viewer:
 
     def update_visuals(self) -> None:
         angles = [float(value) for value in self.observation["angle"]]
-        poses = link_poses(angles)
-        for body, (position, rotation) in zip(self.bodies, poses):
+        slope = float(self.observation.get("slope_angle", 0.0))
+        direction = float(self.observation.get("slope_direction", 0.0))
+        yaw = float(self.observation.get("base_yaw", 0.0))
+        ground_rotation = terrain_rotation(slope, direction)
+        ground_normal = ground_rotation @ np.array([0.0, 0.0, 1.0])
+        p.resetBasePositionAndOrientation(
+            self.ground,
+            (-0.005 * ground_normal).tolist(),
+            quaternion_from_matrix(ground_rotation),
+        )
+        rotation = base_rotation(slope, direction, yaw)
+        p.resetBasePositionAndOrientation(
+            self.base_body,
+            [0.0, 0.0, 0.0],
+            quaternion_from_matrix(rotation),
+        )
+        poses = link_poses(angles, rotation)
+        for body, (position, pose_rotation) in zip(self.bodies, poses):
             p.resetBasePositionAndOrientation(
                 body,
                 position.tolist(),
-                quaternion_from_matrix(rotation),
+                quaternion_from_matrix(pose_rotation),
             )
-        axis_positions = []
-        parent_rotations = [np.eye(3)]
+        parent_rotations = [rotation]
         parent_rotations.append(poses[0][1])
         parent_rotations.append(poses[1][1])
         parent_rotations.append(poses[2][1])
@@ -336,6 +387,22 @@ class Viewer:
             textSize=1.0,
             replaceItemUniqueId=self.mode_text_id,
         )
+        base_text = ("slope=%+.1f deg  dir=%+.1f deg  yaw=%+.1f deg"
+                     % (math.degrees(slope), math.degrees(direction),
+                        math.degrees(yaw)))
+        acceleration = self.observation.get("base_acceleration")
+        if self.base_acceleration_available and acceleration is not None:
+            base_text += "  acc=(%+.2f, %+.2f, %+.2f) m/s2" % tuple(
+                float(value) for value in acceleration)
+        else:
+            base_text += "  acc=--"
+        self.base_text_id = p.addUserDebugText(
+            base_text,
+            [0.0, 0.0, 0.555],
+            textColorRGB=[0.85, 0.85, 0.85],
+            textSize=0.9,
+            replaceItemUniqueId=self.base_text_id,
+        )
 
     def step(self) -> None:
         if not self.direct:
@@ -365,10 +432,30 @@ def main() -> int:
                         help="策略模式使用的检查点路径，默认 data/rl_final.pt")
     parser.add_argument("--lock-roll", action="store_true",
                         help="无界面模式下在中途锁定 roll 轴，末尾解锁，用于自检")
+    parser.add_argument("--slope-angle", type=float, default=0.0,
+                        help="仿真模式下底盘所在坡面的坡度，度")
+    parser.add_argument("--slope-direction", type=float, default=0.0,
+                        help="仿真模式下坡向，度")
+    parser.add_argument("--base-yaw", type=float, default=0.0,
+                        help="仿真模式下底盘相对坡面坐标系的 yaw，度")
+    parser.add_argument("--base-acceleration", type=float, nargs=3,
+                        default=(0.0, 0.0, 0.0), metavar=("AX", "AY", "AZ"),
+                        help="仿真模式下底盘参考点线加速度，m/s²")
+    parser.add_argument("--robot", action="store_true",
+                        help="连接实车控制器，坡度、坡向与底盘 yaw 取头部 IMU 反解值")
     arguments = parser.parse_args()
 
+    environment = None
+    if arguments.robot:
+        from robot_env import RealGimbalEnv
+        environment = RealGimbalEnv()
     viewer = Viewer(direct=arguments.direct, mode=arguments.mode,
-                    target_rate=arguments.target_rate, policy_path=arguments.policy)
+                    target_rate=arguments.target_rate, policy_path=arguments.policy,
+                    environment=environment,
+                    terrain={"slope_angle": math.radians(arguments.slope_angle),
+                             "slope_direction": math.radians(arguments.slope_direction)},
+                    base={"yaw": math.radians(arguments.base_yaw),
+                          "acceleration": list(arguments.base_acceleration)})
     try:
         if arguments.direct:
             steps = arguments.steps if arguments.steps > 0 else 60
@@ -390,6 +477,16 @@ def main() -> int:
             print("mode:", viewer.mode)
             print("angles:", [round(float(value), 6) for value in angles])
             print("velocities:", [round(float(value), 6) for value in velocities])
+            print("slope_angle:", round(float(viewer.observation["slope_angle"]), 6))
+            print("slope_direction:",
+                  round(float(viewer.observation["slope_direction"]), 6))
+            print("base_yaw:", round(float(viewer.observation["base_yaw"]), 6))
+            if viewer.base_acceleration_available:
+                print("base_acceleration:", [
+                    round(float(value), 6)
+                    for value in viewer.observation["base_acceleration"]])
+            else:
+                print("base_acceleration: n/a")
             target = getattr(viewer.controllers[viewer.mode], "target", None)
             if target is not None:
                 print("target:", [round(float(value), 6) for value in target])

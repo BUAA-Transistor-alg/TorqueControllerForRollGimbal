@@ -69,6 +69,8 @@ class Environment(abc.ABC):
     """采集脚本依赖的环境接口。"""
 
     supports_roll_lock = False
+    # 观测是否包含实测底盘参考点线加速度；实车暂未解算，界面显示留空
+    supports_base_acceleration = True
 
     @abc.abstractmethod
     def reset(self, config: dict) -> dict:
